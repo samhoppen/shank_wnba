@@ -10,7 +10,7 @@ import streamlit
 from PyInstaller.utils.hooks import copy_metadata
 
 STREAMLIT_DIR = Path(streamlit.__file__).parent
-WORK_DIR = Path(r"C:\Users\shank.subramani_betf\Desktop\ShotsDashboard\.claude\worktrees\eloquent-blackwell")
+WORK_DIR = Path(r"C:\Users\shank.subramani_betf\Desktop\ShotsDashboard")
 
 a = Analysis(
     [str(WORK_DIR / "run_march_madness.py")],
@@ -20,8 +20,8 @@ a = Analysis(
         # Package metadata (fixes PackageNotFoundError for streamlit)
         *copy_metadata("streamlit"),
         # Main app script & data
-        (str(WORK_DIR / "march_madness_sim_app.py"),                         "."),
-        (str(WORK_DIR.parent.parent.parent / "team_ratings_cache.csv"),      "."),
+        (str(WORK_DIR / "march_madness_sim_app.py"),  "."),
+        (str(WORK_DIR / "team_ratings_cache.csv"),    "."),
         # Streamlit frontend assets
         (str(STREAMLIT_DIR / "static"),  "streamlit/static"),
         (str(STREAMLIT_DIR / "runtime"), "streamlit/runtime"),
