@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Streamlit logs
+streamlit_out.log
+.streamlit/
+
+# React dev dependencies — build/ is committed so the app works without npm
+components/rotation_chart/frontend/node_modules/
+components/rotation_chart/frontend/.vite/
+
+# Large external data (lives in WNBA_RAPM/wnba_data/ — not in this folder)
+data/bigdataball/
+
+# Un-ignore data CSVs caught by root gitignore's game_*.csv pattern
+!data/game_log.csv
