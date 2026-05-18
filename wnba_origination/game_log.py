@@ -24,6 +24,14 @@ from paths import RAPM_DIR, DATA, stints as stints_path
 RAW_PBP_DIR = RAPM_DIR / "raw_pbp"
 GAME_LOG_CACHE = DATA / "game_log.csv"
 
+# Pull in the PBP possession walker for accurate pace counts
+import sys as _sys
+_sys.path.insert(0, str(RAPM_DIR.parent / "analysis"))
+try:
+    from dal_poss_breakdown import walk_possessions
+except ImportError:
+    walk_possessions = None
+
 # action_type values
 FT_TYPES = {"Free Throw"}
 REBOUND_TYPES = {"Rebound"}
@@ -200,19 +208,45 @@ def build(years: list[int] | None = None, verbose: bool = True) -> pd.DataFrame:
         if not h or not a:
             continue
 
-        # Pace: estimated from PBP counting stats (FGA - OREB + TOV + 0.44*FTA) per team, averaged.
-        # More reliable than stints row count which can be incomplete for some games.
-        def _est_poss(s):
-            return s["fga"] - s["oreb"] + s["tov"] + 0.44 * s["fta"]
-        pace = round((_est_poss(h) + _est_poss(a)) / 2, 1)
+        # Possessions: COUNT actual possessions via PBP walker per team
+        # (each Made FG, Made-last-FT, DREB, TOV, or period-end ends a possession).
+        # Falls back to box-score formula on walker failure.
+        poss = None  # raw per-team possessions (avg of home/away)
+        if walk_possessions is not None:
+            try:
+                pbp_df = pd.DataFrame(pbp)
+                teams = [t for t in pbp_df["teamTricode"].dropna().unique() if t]
+                counts = [len(walk_possessions(pbp_df, t)) for t in teams]
+                poss = round(sum(counts) / len(counts), 1) if counts else None
+            except Exception:
+                poss = None
+        if poss is None:
+            def _est_poss(s):
+                return s["fga"] - s["oreb"] + s["tov"] + 0.44 * s["fta"]
+            poss = round((_est_poss(h) + _est_poss(a)) / 2, 1)
+
+        # OT detection from PBP — max period > 4 means OT.
+        # game_minutes = 40 (reg) + 5 × ot_periods.
+        max_period = 4
+        for ev in pbp:
+            try:
+                p = int(ev.get("period", 0) or 0)
+                if p > max_period:
+                    max_period = p
+            except Exception:
+                pass
+        ot_periods = max(0, max_period - 4)
+        game_minutes = 40 + ot_periods * 5
+        # Pace = possessions normalized to 40-minute game length.
+        pace = round(poss * 40.0 / game_minutes, 1) if game_minutes else poss
 
         hf = _four_factors(h, a)
         af = _four_factors(a, h)
 
-        # Scores from last event
+        # Scores from last event (cast to numeric — some PBP feeds store as str)
         last = pbp[-1] if pbp else {}
-        home_pts = last.get("score_home", np.nan)
-        away_pts = last.get("score_away", np.nan)
+        home_pts = pd.to_numeric(last.get("score_home"), errors="coerce")
+        away_pts = pd.to_numeric(last.get("score_away"), errors="coerce")
 
         rows.append({
             "game_id": game_id,
@@ -225,6 +259,8 @@ def build(years: list[int] | None = None, verbose: bool = True) -> pd.DataFrame:
             "away_pts": away_pts,
             "margin": (home_pts - away_pts) if pd.notna(home_pts) and pd.notna(away_pts) else np.nan,
             "pace": pace,
+            "poss": poss,
+            "ot_periods": ot_periods,
             # Home five factors
             "h_efg": hf["efg_pct"], "h_tov": hf["tov_pct"],
             "h_oreb": hf["oreb_pct"], "h_ftr": hf["ft_rate"],

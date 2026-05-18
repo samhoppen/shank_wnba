@@ -1,0 +1,50 @@
+season,category,sub_type,total,per_game,per_100_poss
+2025_full,Foul,Shooting,4477,15.654,12.3347
+2025_full,Foul,Personal,3795,13.269,10.4557
+2025_full,Foul,Flagrant Type 1,48,0.168,0.1322
+2025_full,Violation,Kicked Ball,247,0.864,0.6805
+2025_full,Foul,Offensive,788,2.755,2.171
+2025_full,Called Violation,Offensive Foul Turnover,883,3.087,2.4328
+2025_full,Foul,Loose Ball,576,2.014,1.587
+2025_full,Foul,Offensive Charge,85,0.297,0.2342
+2025_full,Called Violation,Traveling,452,1.58,1.2453
+2025_full,Violation,Delay Of Game,80,0.28,0.2204
+2025_full,Foul,Technical,139,0.486,0.383
+2025_full,Foul,Defense 3 Second,61,0.213,0.1681
+2025_full,Foul,Transition Take,43,0.15,0.1185
+2025_full,Foul,Away From Play,33,0.115,0.0909
+2025_full,Foul,Double Technical,15,0.052,0.0413
+2025_full,Called Violation,Lane Violation,10,0.035,0.0276
+2025_full,Called Violation,Backcourt Turnover,47,0.164,0.1295
+2025_full,Called Violation,5 Second Violation,17,0.059,0.0468
+2025_full,Foul,Clear Path,8,0.028,0.022
+2025_full,Called Violation,3 Second Violation,36,0.126,0.0992
+2025_full,Called Violation,Palming Turnover,6,0.021,0.0165
+2025_full,Foul,Personal Take,128,0.448,0.3527
+2025_full,Called Violation,Double Dribble,26,0.091,0.0716
+2025_full,Called Violation,Discontinue Dribble,12,0.042,0.0331
+2025_full,Foul,Delay Technical,2,0.007,0.0055
+2025_full,Foul,Double Personal,3,0.01,0.0083
+2025_full,Violation,Jump Ball,36,0.126,0.0992
+2025_full,Violation,Lane,5,0.017,0.0138
+2025_full,Foul,Flagrant Type 2,2,0.007,0.0055
+2025_full,Foul,,1,0.003,0.0028
+2025_full,Foul,Too Many Players Technical,2,0.007,0.0055
+2026_first8,Called Violation,Traveling,14,1.75,1.3462
+2026_first8,Called Violation,3 Second Violation,3,0.375,0.2885
+2026_first8,Violation,Delay Of Game,5,0.625,0.4808
+2026_first8,Foul,Shooting,143,17.875,13.75
+2026_first8,Foul,Personal,138,17.25,13.2692
+2026_first8,Violation,Jump Ball,3,0.375,0.2885
+2026_first8,Foul,Loose Ball,25,3.125,2.4038
+2026_first8,Foul,Offensive,43,5.375,4.1346
+2026_first8,Called Violation,Offensive Foul Turnover,45,5.625,4.3269
+2026_first8,Foul,Technical,7,0.875,0.6731
+2026_first8,Violation,Kicked Ball,7,0.875,0.6731
+2026_first8,Foul,Defense 3 Second,2,0.25,0.1923
+2026_first8,Foul,Flagrant Type 1,4,0.5,0.3846
+2026_first8,Foul,Offensive Charge,1,0.125,0.0962
+2026_first8,Violation,Lane,1,0.125,0.0962
+2026_first8,Called Violation,5 Second Violation,2,0.25,0.1923
+2026_first8,Foul,Personal Take,4,0.5,0.3846
+2026_first8,Called Violation,Backcourt Turnover,1,0.125,0.0962

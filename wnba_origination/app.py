@@ -120,14 +120,130 @@ def spread_display(spread: float, home: str, away: str) -> str:
     return "PK"
 
 
+_TRICODE_ALIAS = {"PDX": "POR", "PHO": "PHX"}
+
+
+def _norm_tri(t: str) -> str:
+    return _TRICODE_ALIAS.get(t, t)
+
+
+def _last_game_minutes(team_abbr: str, store: pd.DataFrame) -> pd.DataFrame:
+    """Return projected minutes from the team's most recent 2026 game.
+
+    Uses the PBP walker (interval-based, ESPN-accurate) on the team's last 2026
+    game directly. Falls back to empty DataFrame if no 2026 PBP available.
+    """
+    import json as _json
+    from pathlib import Path
+    from paths import RAPM_DIR
+    from matchup import ABBR_TO_TEAM_ID
+
+    team_id = ABBR_TO_TEAM_ID.get(team_abbr)
+    if team_id is None:
+        return pd.DataFrame()
+
+    games_p = RAPM_DIR / "games_2026_Regular_Season.csv"
+    if not games_p.exists():
+        return pd.DataFrame()
+    games = pd.read_csv(games_p, dtype={"game_id": str})
+    games["game_id"] = games["game_id"].astype(str)
+    team_games = games[
+        (games["home_team_id"] == team_id) | (games["away_team_id"] == team_id)
+    ].sort_values("game_date", ascending=False)
+    if team_games.empty:
+        return pd.DataFrame()
+
+    # Try the most recent game first, fall back to earlier ones if PBP missing
+    pres = mins = None
+    chosen_gid = None
+    raw_dir = RAPM_DIR / "raw_pbp"
+    for _, grow in team_games.iterrows():
+        gid = str(grow["game_id"]).zfill(10)
+        pbp_path = raw_dir / f"{gid}_pbp.json"
+        sp_path = raw_dir / f"{gid}_starters.json"
+        if not pbp_path.exists():
+            continue
+        try:
+            with open(pbp_path, encoding="utf-8") as f:
+                pbp = _json.load(f)
+            starters_team: set = set()
+            if sp_path.exists():
+                with open(sp_path, encoding="utf-8") as f:
+                    sd = _json.load(f)
+                raw = sd.get(str(team_id))
+                if raw:
+                    starters_team = {int(x) for x in raw}
+            pres, mins = _game_presence_from_pbp(pbp, team_id, starters_team)
+            chosen_gid = gid
+            break
+        except Exception:
+            continue
+
+    if mins is None or not mins:
+        return pd.DataFrame()
+
+    # Build rows from the walker output (mins is {player_id: exact_minutes})
+    name_map: dict = {}
+    for ev in pbp:
+        if int(ev.get("team_id", 0) or 0) != team_id:
+            continue
+        pid_raw = ev.get("person_id")
+        nm = str(ev.get("playerName", "") or "").strip()
+        if pid_raw and nm:
+            try:
+                name_map[int(pid_raw)] = nm
+            except Exception:
+                pass
+
+    rows = []
+    for pid, m in mins.items():
+        if m <= 0:
+            continue
+        rows.append({"player_id": int(pid),
+                     "player_name": name_map.get(int(pid), str(pid)),
+                     "proj_minutes": round(float(m), 1)})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("proj_minutes", ascending=False)
+
+    # Join RAPM/team info from store
+    df = df.merge(
+        store[["player_id", "team_abbr", "minutes", "minutes_per_game", "orapm", "drapm"]],
+        on="player_id", how="left",
+    )
+    df["team_abbr"] = df["team_abbr"].fillna(team_abbr)
+    # Prefer the name from store if available (more canonical), else PBP name
+    df["player_name"] = df.apply(
+        lambda r: r.get("player_name", "") if "player_name" in r else str(r["player_id"]),
+        axis=1,
+    )
+    df["orapm"] = df["orapm"].fillna(0.0)
+    df["drapm"] = df["drapm"].fillna(0.0)
+    df["minutes"] = df["minutes"].fillna(0.0)
+    df["minutes_per_game"] = df["minutes_per_game"].fillna(0.0)
+    return df[[
+        "player_id", "player_name", "team_abbr",
+        "minutes", "minutes_per_game", "proj_minutes",
+        "orapm", "drapm",
+    ]].head(12).reset_index(drop=True)
+
+
 def _default_minutes(team_abbr: str, store: pd.DataFrame) -> pd.DataFrame:
-    """Return top-12 players for a team with projected minutes (0-40 scale)."""
+    """Return top-12 players for a team with projected minutes (0-40 scale).
+
+    Preferred source: the team's most recent 2026 game (actual minutes played).
+    Fallback: season-average minutes from player_store, scaled to ~200 floor-minutes.
+    """
+    # Try last-game first
+    last = _last_game_minutes(team_abbr, store)
+    if not last.empty:
+        return last
+
+    # Fallback to season-average roster
     roster = store[store["team_abbr"] == team_abbr].copy()
     roster = roster[roster["minutes"] > 0].sort_values("minutes", ascending=False).head(12)
     if roster.empty:
         return roster
-
-    # Scale historical minutes share to projected game minutes (sum ~200 for 5 players × 40 min)
     total = roster["minutes"].sum()
     roster["proj_minutes"] = (roster["minutes"] / total * 200).clip(0, 40).round(1)
     return roster.reset_index(drop=True)
@@ -146,13 +262,13 @@ TEAM_COLORS: dict[str, dict[str, str]] = {
     "CON": {"bg": "#F05023", "fg": "#041E42"},   # orange / navy
     "DAL": {"bg": "#C4D600", "fg": "#00235D"},   # lime   / navy
     "GSV": {"bg": "#AD96DC", "fg": "#010101"},   # valkyrie violet / black
-    "IND": {"bg": "#041E42", "fg": "#C8102E"},   # navy   / red
+    "IND": {"bg": "#041E42", "fg": "#FFCD00"},   # navy   / fever gold (PMS 116)
     "LAS": {"bg": "#702F8A", "fg": "#FFC72C"},   # purple / gold
     "LVA": {"bg": "#010101", "fg": "#BA0C2F"},   # black  / aces red
     "MIN": {"bg": "#266092", "fg": "#FFFFFF"},   # blue   / white
     "NYL": {"bg": "#6ECEB2", "fg": "#FF671F"},   # teal   / orange
     "PHX": {"bg": "#CB6015", "fg": "#201747"},   # orange / navy
-    "POR": {"bg": "#E93CAC", "fg": "#C8102E"},   # pink   / red
+    "POR": {"bg": "#E93CAC", "fg": "#010101"},   # pink   / black (PMS 232 / Black C)
     "SEA": {"bg": "#2C5234", "fg": "#FBE122"},   # green  / yellow
     "TOR": {"bg": "#612C51", "fg": "#B8CCEA"},   # bordeaux / sky blue
     "WAS": {"bg": "#0C2340", "fg": "#C8102E"},   # navy   / red
@@ -178,8 +294,8 @@ def team_badge(abbr: str, size: str = "1.3rem") -> str:
 _PCT_COLS = {"eFG%", "TOV%", "OREB%", "FTR",
              "H eFG%", "H TOV%", "H OREB%", "H FTR",
              "A eFG%", "A TOV%", "A OREB%", "A FTR"}
-_INT_COLS = {"FGA", "3PA", "FTA", "OREB", "TOV", "Pts", "Opp",
-             "home_pts", "away_pts", "Pace", "pace"}
+_INT_COLS = {"FGA", "3PA", "FTA", "OREB", "TOV", "Pts", "Opp", "OppPts",
+             "home_pts", "away_pts", "Poss", "OT"}
 
 
 def _html_table(df: pd.DataFrame, height: int = 580, table_id: str = "gl") -> str:
@@ -203,7 +319,7 @@ def _html_table(df: pd.DataFrame, height: int = 580, table_id: str = "gl") -> st
         cells = []
         for col in df.columns:
             val = row[col]
-            if col in ("Home", "Away"):
+            if col in ("Home", "Away", "Team", "Opp"):
                 # store raw abbr in data-sort so JS can sort by it
                 cell = (f'<td style="{TD_BASE}" data-sort="{val}">'
                         f'{team_badge(str(val), "0.72rem")}</td>')
@@ -223,7 +339,7 @@ def _html_table(df: pd.DataFrame, height: int = 580, table_id: str = "gl") -> st
                     color, txt, sv = "#777", "—", -9999
                 cell = (f'<td style="{TD_NUM};color:{color};font-weight:600" '
                         f'data-sort="{sv}">{txt}</td>')
-            elif col in _INT_COLS or col in ("Pace",):
+            elif col in _INT_COLS:
                 sv  = val if pd.notna(val) else -999
                 txt = f"{int(val)}" if pd.notna(val) else "—"
                 cell = f'<td style="{TD_NUM}" data-sort="{sv}">{txt}</td>'
@@ -284,12 +400,29 @@ def _html_table(df: pd.DataFrame, height: int = 580, table_id: str = "gl") -> st
 
 def _players_for_chart(team_abbr: str, store: pd.DataFrame) -> list[dict]:
     """Build player list for the rotation chart component.
-    If a saved rotation exists it is the sole source of who appears — player_store
-    only supplies RAPM values, not the roster itself."""
-    saved = roster_mod.get_rotation(team_abbr)
 
+    Priority:
+      1. Last 2026 game's actual minutes (preferred — freshest data)
+      2. Saved rotation override (manual pin via 'Save rotation' button)
+      3. Season-average minutes from player_store (final fallback)
+    """
+    # 1) Prefer last 2026 game's actual minutes if available.
+    last = _last_game_minutes(team_abbr, store)
+    if not last.empty:
+        return [
+            {
+                "player_id": int(row["player_id"]),
+                "player_name": str(row["player_name"]),
+                "default_minutes": float(row["proj_minutes"]),
+                "orapm": float(row["orapm"]) if pd.notna(row["orapm"]) else 0.0,
+                "drapm": float(row["drapm"]) if pd.notna(row["drapm"]) else 0.0,
+            }
+            for _, row in last.iterrows()
+        ]
+
+    # 2) Fall back to saved rotation override.
+    saved = roster_mod.get_rotation(team_abbr)
     if saved is not None:
-        # Saved rotation drives the player list
         store_idx = store.set_index("player_id")
         players = []
         for _, row in saved.iterrows():
@@ -310,7 +443,7 @@ def _players_for_chart(team_abbr: str, store: pd.DataFrame) -> list[dict]:
             })
         return players
 
-    # No saved rotation — fall back to player_store
+    # 3) Season-average fallback from player_store.
     roster = _default_minutes(team_abbr, store)
     if roster.empty:
         return []
@@ -326,38 +459,278 @@ def _players_for_chart(team_abbr: str, store: pd.DataFrame) -> list[dict]:
     ]
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _recent_game_presence(team_abbr: str, n: int = 5, year: int = 2025) -> list[dict]:
+_CLOCK_PAT = __import__("re").compile(r"PT(\d+)M([\d.]+)S")
+_SUB_PAT   = __import__("re").compile(r"SUB:\s*(.+?)\s+FOR\s+(.+)")
+
+
+def _game_presence_from_pbp(pbp_rows: list, team_id: int, starters_team: set) -> tuple:
+    """Walk PBP for one game, return (presence, minutes).
+
+    presence[pid] = list[bool]*40 — minute-bucket chart presence
+    minutes[pid]  = float — exact total minutes on floor, computed by tracking
+                    each on-floor *interval* (start_clock, end_clock) and summing
+                    fractional durations. No bucket rounding inflation.
+
+    Handles data-quality issues:
+      * SUB OUT for player not in tracked lineup → assume they came on at
+        start of current period (lost sub-in event); open interval at period start.
+      * SUB IN for player already in tracked lineup → assume they actually left
+        at start of period (lost sub-out event); discard inflated interval.
+      * Any non-sub event for a team player → ensures they're tracked as on-floor.
     """
-    For each of the last N games, return minute-level player presence derived from stints.
-    Each row index is mapped to a game-minute bucket (0-39).
+    name_to_pid: dict = {}
+    for ev in pbp_rows:
+        if int(ev.get("team_id", 0) or 0) == team_id:
+            pid = ev.get("person_id")
+            name = str(ev.get("playerName", "") or "").strip()
+            if pid and name:
+                try:
+                    name_to_pid[name] = int(pid)
+                except Exception:
+                    pass
+
+    # Sort by true chronological order. NBA Stats PBP occasionally has late
+    # events of a period appended after the next period's block (order_number
+    # is monotonic but period is not). Also at the same clock, substitutions
+    # are often listed BEFORE the action that caused them (e.g., foul →
+    # sub-out). We want chronologically-causal order: action first, then sub.
+    def _sort_key(ev):
+        try:
+            p = int(ev.get("period", 0) or 0)
+        except Exception:
+            p = 0
+        clock_str = str(ev.get("clock", "") or "")
+        mc = _CLOCK_PAT.match(clock_str)
+        if mc:
+            cs = int(mc.group(1)) * 60 + float(mc.group(2))
+        else:
+            cs = 0.0
+        action = str(ev.get("action_type", "") or "")
+        # Priority within same clock: actions first (0), subs after (1),
+        # period markers (Start/End of period) last (2).
+        if action == "Substitution":
+            ap = 1
+        elif action == "period":
+            ap = 2
+        else:
+            ap = 0
+        try:
+            o = int(ev.get("order_number", 0) or 0)
+        except Exception:
+            o = 0
+        return (p, -cs, ap, o)
+
+    pbp_rows = sorted(pbp_rows, key=_sort_key)
+
+    current_lineup: set = set(starters_team)
+    presence: dict = {pid: [False] * 40 for pid in starters_team}
+    # active_interval[pid] = (start_clock_sec_remaining, period) when open, else absent
+    active_interval: dict = {}
+    # period_minutes[(pid, period)] = seconds accumulated for that period
+    period_minutes: dict = {}
+    # period_events[(pid, period)] = # of non-sub events for the team. Used to
+    # detect ghost-lineup members (players in lineup but with no actual activity).
+    period_events: dict = {}
+    last_period = 0
+
+    def _ensure(pid: int):
+        if pid not in presence:
+            presence[pid] = [False] * 40
+
+    def _open(pid: int, clock_sec: float, period: int):
+        active_interval[pid] = (clock_sec, period)
+
+    def _close(pid: int, clock_sec: float, period: int):
+        if pid not in active_interval:
+            return
+        start_clock, start_period = active_interval[pid]
+        del active_interval[pid]
+        if start_period != period:
+            return
+        elapsed_sec = start_clock - clock_sec  # remaining-time → elapsed
+        if elapsed_sec > 0:
+            key = (pid, period)
+            period_minutes[key] = period_minutes.get(key, 0.0) + elapsed_sec
+
+    def _discard(pid: int):
+        active_interval.pop(pid, None)
+
+    for ev in pbp_rows:
+        try:
+            period = int(ev.get("period", 0) or 0)
+        except Exception:
+            continue
+        if period == 0:
+            continue
+        clock_str = str(ev.get("clock", "") or "")
+        m = _CLOCK_PAT.match(clock_str)
+        if not m:
+            continue
+        clock_sec = int(m.group(1)) * 60 + float(m.group(2))
+        period_len = 600.0 if period <= 4 else 300.0
+        elapsed = period_len - clock_sec
+        if period <= 4:
+            game_min = (period - 1) * 10 + int(elapsed / 60)
+        else:
+            game_min = 39
+        if game_min < 0:
+            game_min = 0
+        if game_min >= 40:
+            game_min = 39
+
+        # Period transition: close everything at clock=0 of prev period; open
+        # everything in current_lineup at period_len of new period.
+        if period != last_period:
+            if last_period > 0:
+                for pid in list(active_interval.keys()):
+                    _close(pid, 0.0, last_period)
+            for pid in list(current_lineup):
+                _ensure(pid)
+                _open(pid, period_len, period)
+            last_period = period
+
+        # Chart: mark current lineup at this minute bucket
+        for pid in current_lineup:
+            _ensure(pid)
+            presence[pid][game_min] = True
+
+        action = ev.get("action_type", "")
+        team_id_ev = int(ev.get("team_id", 0) or 0)
+
+        # "Any team event by a player" → they're on the floor at this minute.
+        # Adds them to lineup + opens an interval at period start if they weren't tracked.
+        if action != "Substitution" and team_id_ev == team_id:
+            raw = ev.get("person_id")
+            if raw:
+                try:
+                    epid = int(raw)
+                    if epid > 0:
+                        _ensure(epid)
+                        presence[epid][game_min] = True
+                        # Track event count per period (used for ghost-lineup eviction below)
+                        period_events[(epid, period)] = period_events.get((epid, period), 0) + 1
+                        if epid not in current_lineup:
+                            current_lineup.add(epid)
+                            _open(epid, period_len, period)
+                except Exception:
+                    pass
+
+        if action == "Substitution" and team_id_ev == team_id:
+            raw_out = ev.get("person_id")
+            try:
+                out_pid = int(raw_out) if raw_out is not None else None
+            except Exception:
+                out_pid = None
+            desc = str(ev.get("description", "") or "")
+            ms = _SUB_PAT.search(desc)
+            in_pid = None
+            if ms:
+                in_name = ms.group(1).strip()
+                in_pid = name_to_pid.get(in_name)
+
+            # Case A: SUB OUT for player not in lineup → data lost sub-in.
+            # Mark chart present from period start, open interval at period start.
+            if out_pid is not None and out_pid not in current_lineup:
+                _ensure(out_pid)
+                p_start_min = (period - 1) * 10
+                for mm in range(p_start_min, game_min + 1):
+                    if 0 <= mm < 40:
+                        presence[out_pid][mm] = True
+                _open(out_pid, period_len, period)
+
+            # Case B: SUB IN for player already in lineup → data lost sub-out.
+            # Clear chart from period start and DISCARD inflated interval.
+            if in_pid is not None and in_pid in current_lineup:
+                _ensure(in_pid)
+                p_start_min = (period - 1) * 10
+                for mm in range(p_start_min, game_min):
+                    if 0 <= mm < 40:
+                        presence[in_pid][mm] = False
+                _discard(in_pid)
+
+            if out_pid is not None:
+                _close(out_pid, clock_sec, period)
+                current_lineup.discard(out_pid)
+            if in_pid is not None:
+                _ensure(in_pid)
+                current_lineup.add(in_pid)
+                _open(in_pid, clock_sec, period)
+
+    # Close any remaining intervals at end of game.
+    if last_period > 0:
+        for pid in list(active_interval.keys()):
+            _close(pid, 0.0, last_period)
+
+    # Post-process: discard period_minutes for any (player, period) with 0
+    # events that period. This catches "ghost lineup" entries — players carried
+    # in current_lineup across a period boundary even though they were subbed
+    # out at the top of the period (data lost the sub-out event).
+    for (pid, per) in list(period_minutes.keys()):
+        if period_events.get((pid, per), 0) == 0:
+            del period_minutes[(pid, per)]
+            # Clear chart presence for that period
+            if per <= 4:
+                p_start_min = (per - 1) * 10
+                p_end_min = per * 10
+            else:
+                p_start_min = 39
+                p_end_min = 40
+            for mm in range(p_start_min, p_end_min):
+                if 0 <= mm < 40 and pid in presence:
+                    presence[pid][mm] = False
+
+    # Sum period minutes → total minutes per player
+    minutes: dict = {}
+    for (pid, _per), sec in period_minutes.items():
+        minutes[pid] = minutes.get(pid, 0.0) + sec / 60.0
+    for pid in presence:
+        if pid not in minutes:
+            minutes[pid] = 0.0
+
+    return presence, minutes
+
+
+def _recent_game_presence(team_abbr: str, n: int = 5, year: int | None = None) -> list[dict]:
+    """
+    For each of the last N games, return minute-level player presence built from
+    raw PBP (clock-based, with substitution tracking).
     Returns list of {game_date, opponent, is_home, presence: {player_id: [bool]*40}}
     ordered most-recent first.
+
+    If `year` is None, takes the most recent N games across 2026 (preferred)
+    and tops up from 2025 if 2026 has fewer than N for this team.
     """
+    import json as _json
     import re as _re
-    from paths import RAPM_DIR, stints as stints_path
+    from paths import RAPM_DIR
     from matchup import ABBR_TO_TEAM_ID
 
     team_id = ABBR_TO_TEAM_ID.get(team_abbr)
     if team_id is None:
         return []
 
-    games_p = RAPM_DIR / f"games_{year}_Regular_Season.csv"
-    if not games_p.exists():
-        return []
-    games = pd.read_csv(games_p, usecols=["game_id", "game_date", "home_team_id", "away_team_id", "matchup"])
-    games["game_id"] = games["game_id"].astype(str)
-    team_games = games[
-        (games["home_team_id"] == team_id) | (games["away_team_id"] == team_id)
-    ].sort_values("game_date", ascending=False).head(n)
+    years = [year] if year is not None else [2026, 2025]
 
+    team_games_frames = []
+    for y in years:
+        games_p = RAPM_DIR / f"games_{y}_Regular_Season.csv"
+        if not games_p.exists():
+            continue
+        g = pd.read_csv(games_p, usecols=["game_id", "game_date", "home_team_id", "away_team_id", "matchup"])
+        g["game_id"] = g["game_id"].astype(str)
+        g["__year"] = y
+        team_games_frames.append(
+            g[(g["home_team_id"] == team_id) | (g["away_team_id"] == team_id)]
+        )
+
+    if not team_games_frames:
+        return []
+    team_games = pd.concat(team_games_frames, ignore_index=True)
+    team_games = team_games.sort_values("game_date", ascending=False).head(n)
     if team_games.empty:
         return []
 
-    sp = stints_path(year)
-    if not sp.exists():
-        return []
-    stints_df = pd.read_csv(sp, dtype={"game_id": str})
+    raw_pbp_dir = RAPM_DIR / "raw_pbp"
 
     results = []
     for _, grow in team_games.iterrows():
@@ -374,30 +747,46 @@ def _recent_game_presence(team_abbr: str, n: int = 5, year: int = 2025) -> list[
         else:
             opp = "?"
 
-        gs = stints_df[stints_df["game_id"] == gid].reset_index(drop=True)
-        if gs.empty:
+        pbp_path = raw_pbp_dir / f"{gid}_pbp.json"
+        starters_path = raw_pbp_dir / f"{gid}_starters.json"
+        if not pbp_path.exists():
+            continue
+        try:
+            with open(pbp_path, encoding="utf-8") as fh:
+                pbp_rows = _json.load(fh)
+        except Exception:
+            continue
+        if not pbp_rows:
             continue
 
-        total = len(gs)
-        presence: dict[int, list[bool]] = {}
+        # Starters for this team
+        starters_team: set = set()
+        if starters_path.exists():
+            try:
+                with open(starters_path, encoding="utf-8") as fh:
+                    sd = _json.load(fh)
+                # JSON keys are str team_ids → list of player_ids
+                raw = sd.get(str(team_id)) or sd.get(int(team_id))  # type: ignore
+                if isinstance(raw, list):
+                    starters_team = {int(x) for x in raw}
+            except Exception:
+                starters_team = set()
+        if not starters_team:
+            # Fallback: first 5 distinct player_ids for this team in PBP non-sub events
+            seen = []
+            for ev in pbp_rows:
+                if int(ev.get("team_id", 0) or 0) != team_id:
+                    continue
+                if ev.get("action_type") == "Substitution":
+                    continue
+                pid = ev.get("person_id")
+                if pid and int(pid) not in seen:
+                    seen.append(int(pid))
+                if len(seen) == 5:
+                    break
+            starters_team = set(seen)
 
-        for row_i, row in gs.iterrows():
-            game_min = min(int(row_i * 40 / total), 39)
-
-            if row["off_team"] == team_id:
-                p_cols = ["off_p1", "off_p2", "off_p3", "off_p4", "off_p5"]
-            elif row["def_team"] == team_id:
-                p_cols = ["def_p1", "def_p2", "def_p3", "def_p4", "def_p5"]
-            else:
-                continue
-
-            for col in p_cols:
-                val = row.get(col)
-                if pd.notna(val):
-                    pid = int(val)
-                    if pid not in presence:
-                        presence[pid] = [False] * 40
-                    presence[pid][game_min] = True
+        presence, minutes = _game_presence_from_pbp(pbp_rows, team_id, starters_team)
 
         results.append({
             "game_id": gid,
@@ -405,6 +794,7 @@ def _recent_game_presence(team_abbr: str, n: int = 5, year: int = 2025) -> list[
             "opponent": opp,
             "is_home": is_home,
             "presence": presence,
+            "minutes": minutes,
         })
 
     return results  # most-recent first
@@ -507,9 +897,11 @@ def _presence_grid_html(games_data: list[dict], player_id: int, team_abbr: str) 
     rows_html = []
     for game in games_data:
         presence = game["presence"].get(player_id, [False] * 40)
+        # Exact minutes (interval-based) from walker; falls back to bucket count.
+        exact_min = game.get("minutes", {}).get(player_id)
+        total_on = round(exact_min) if exact_min is not None else sum(presence)
         gdate = game["game_date"][5:]
         opp   = game["opponent"]
-        total_on = sum(presence)
         cells = ""
         for m in range(40):
             on = presence[m]
@@ -554,13 +946,19 @@ def _team_rotation_grid_html(
     if n_games == 0 or not players:
         return "<html><body></body></html>", 50
 
-    # Compute total on-court minutes per player across all games
+    # Compute total on-court minutes per player across all games.
+    # Prefer exact interval-based minutes from the walker; fall back to bucket count.
     all_pids = {p["player_id"] for p in players}
-    pid_total: dict[int, int] = {pid: 0 for pid in all_pids}
+    pid_total: dict[int, float] = {pid: 0.0 for pid in all_pids}
     for g in games_data:
+        mins_map = g.get("minutes", {})
         for pid, pres in g["presence"].items():
-            if pid in pid_total:
-                pid_total[pid] = pid_total[pid] + sum(pres)
+            if pid not in pid_total:
+                continue
+            if pid in mins_map:
+                pid_total[pid] = pid_total[pid] + float(mins_map[pid])
+            else:
+                pid_total[pid] = pid_total[pid] + float(sum(pres))
 
     # Order players: most total minutes first
     ordered = sorted(players, key=lambda p: -pid_total.get(p["player_id"], 0))
@@ -603,7 +1001,7 @@ def _team_rotation_grid_html(
         net        = p["orapm"] + p["drapm"]
         net_color  = tbg if net >= 0 else "#e76f51"
         row_bg     = "#fafafa" if i % 2 == 0 else "#f2f2f2"
-        total_on   = pid_total.get(pid, 0)
+        total_on   = round(pid_total.get(pid, 0.0))
 
         label_cell = (
             f'<td style="width:{LABEL_W}px;text-align:right;padding:1px 6px;'
@@ -664,13 +1062,19 @@ def rotation_editor(
         if st.session_state.get(f"{side}_dnp_{p['player_id']}", False)
     ]
 
+    # team_key includes a fingerprint of (player_id, default_minutes) so the
+    # React component resets stint placement whenever the rotation source
+    # changes (new last-game data, different team, etc.).
+    _fp = "_".join(f"{p['player_id']}-{p['default_minutes']:.0f}" for p in players)
+    _fp_short = str(hash(_fp))[-6:]
+
     # Drag-and-drop stint chart — returns {player_id: total_minutes}
     lineup_raw = rotation_chart(
         players=players,
         label="",
         team_color=_team_bg(team_abbr),
         text_color=_team_fg(team_abbr),
-        team_key=team_abbr,
+        team_key=f"{team_abbr}_{_fp_short}",
         forced_zeros=dnp_pids,
         key=f"chart_{side}",
     )
@@ -755,9 +1159,9 @@ def rotation_editor(
         unsafe_allow_html=True,
     )
 
-    # Inline RAPM overrides — collapsed
+    # Inline RAPM overrides — expanded so it's discoverable
     rapm_overrides: dict[int, tuple[float, float]] = {}
-    with st.expander("RAPM overrides (session only)", expanded=False):
+    with st.expander("✏️ RAPM overrides (session only — edit oRAPM/dRAPM per player)", expanded=True):
         active_players = [p for p in players if lineup.get(p["player_id"], 0) > 0]
         if active_players:
             active_players = sorted(active_players, key=lambda p: p["orapm"] + p["drapm"], reverse=True)
@@ -797,6 +1201,225 @@ def _apply_session_rapm(
     return store
 
 
+# ── Anchor / Rollup helpers (Phase 2) ────────────────────────────────────────
+
+@st.cache_data(ttl=600)
+def _league_anchors() -> dict:
+    """League baseline + last-30 baseline, cached."""
+    import league_stats as ls
+    bl_2026 = ls.league_baselines("2026")
+    bl_last30 = ls.last_n_baselines(30)
+    return {
+        "league_pace_2026":   bl_2026.get("pace"),
+        "league_ortg_2026":   bl_2026.get("ortg"),
+        "league_pace_last30": bl_last30.get("pace"),
+        "league_ortg_last30": bl_last30.get("ortg"),
+    }
+
+
+@st.cache_data(ttl=600)
+def _team_obs(team: str, season: str = "2026") -> dict:
+    """Observed team stats (pace, ortg, drtg, n) from pace_stats."""
+    import league_stats as ls
+    tp = ls.team_profiles(season)
+    if tp.empty:
+        return {}
+    row = tp[tp["team"] == team]
+    if row.empty:
+        return {}
+    r = row.iloc[0]
+    return {
+        "n":    int(r["n"]),
+        "pace": float(r["pace"]),
+        "ortg": float(r["ortg"]),
+        "drtg": float(r["drtg"]) if pd.notna(r["drtg"]) else None,
+    }
+
+
+def _shrink(observed: float, n: int, prior: float, k: float) -> float:
+    """Bayesian shrinkage: (n*observed + k*prior) / (n+k)."""
+    if observed is None or pd.isna(observed):
+        return prior
+    return (n * observed + k * prior) / (n + k)
+
+
+def _render_anchors_panel(home: str, away: str, model_result: dict, neutral: bool) -> None:
+    """Pace + ORTG anchor panel with adjustable shrinkage; opponent-adjusted ORTG."""
+    st.subheader("Pace & ORTG anchors (regression-based)")
+
+    anchors = _league_anchors()
+    league_pace = anchors["league_pace_2026"] or 80.0
+    league_ortg = anchors["league_ortg_2026"] or 105.0
+
+    cc1, cc2 = st.columns([1, 3])
+    with cc1:
+        k = st.slider(
+            "Shrinkage (K games)", 0.0, 30.0, 5.0, step=1.0,
+            help="Higher = pull team estimates harder toward league mean. K=0 uses raw observed.",
+            key="anchor_k",
+        )
+        use_last30 = st.checkbox("Anchor to last 30 games (not full-season)", value=False,
+                                  key="anchor_last30")
+
+    prior_pace = anchors["league_pace_last30"] or league_pace if use_last30 else league_pace
+    prior_ortg = anchors["league_ortg_last30"] or league_ortg if use_last30 else league_ortg
+
+    h = _team_obs(home)
+    a = _team_obs(away)
+
+    # If we don't have observed data for a team, fall back to league mean.
+    h_pace_obs = h.get("pace", prior_pace); h_pace_n = h.get("n", 0)
+    a_pace_obs = a.get("pace", prior_pace); a_pace_n = a.get("n", 0)
+    h_ortg_obs = h.get("ortg", prior_ortg); a_ortg_obs = a.get("ortg", prior_ortg)
+    h_drtg_obs = h.get("drtg", prior_ortg); a_drtg_obs = a.get("drtg", prior_ortg)
+
+    h_pace_reg = _shrink(h_pace_obs, h_pace_n, prior_pace, k)
+    a_pace_reg = _shrink(a_pace_obs, a_pace_n, prior_pace, k)
+    game_pace = (h_pace_reg + a_pace_reg) / 2
+
+    # ORTG: each team's expected ORTG against the OTHER team's defense.
+    # Adj = team_ortg + (opp_drtg - league_drtg) where opp_drtg also shrunk.
+    h_drtg_reg = _shrink(h_drtg_obs, h_pace_n, prior_ortg, k)
+    a_drtg_reg = _shrink(a_drtg_obs, a_pace_n, prior_ortg, k)
+    h_ortg_reg = _shrink(h_ortg_obs, h_pace_n, prior_ortg, k)
+    a_ortg_reg = _shrink(a_ortg_obs, a_pace_n, prior_ortg, k)
+    h_ortg_adj = h_ortg_reg + (a_drtg_reg - prior_ortg)
+    a_ortg_adj = a_ortg_reg + (h_drtg_reg - prior_ortg)
+
+    expected_total = (game_pace * (h_ortg_adj + a_ortg_adj) / 100)
+    expected_h_pts = game_pace * h_ortg_adj / 100
+    expected_a_pts = game_pace * a_ortg_adj / 100
+
+    # Display
+    rows = [
+        ("Pace anchor",          h_pace_obs, h_pace_reg, a_pace_obs, a_pace_reg, prior_pace),
+        ("ORTG anchor (vanilla)", h_ortg_obs, h_ortg_reg, a_ortg_obs, a_ortg_reg, prior_ortg),
+        ("DRTG anchor",          h_drtg_obs, h_drtg_reg, a_drtg_obs, a_drtg_reg, prior_ortg),
+        ("ORTG vs opp D",        None,       h_ortg_adj, None,       a_ortg_adj, prior_ortg),
+    ]
+    tbl_rows = []
+    for label, ho, hr, ao, ar, lg in rows:
+        tbl_rows.append({
+            "Anchor": label,
+            f"{home} obs": f"{ho:.2f}" if ho is not None and not pd.isna(ho) else "—",
+            f"{home} reg": f"{hr:.2f}" if hr is not None and not pd.isna(hr) else "—",
+            f"{away} obs": f"{ao:.2f}" if ao is not None and not pd.isna(ao) else "—",
+            f"{away} reg": f"{ar:.2f}" if ar is not None and not pd.isna(ar) else "—",
+            "League": f"{lg:.2f}",
+        })
+    anchor_df = pd.DataFrame(tbl_rows)
+
+    with cc2:
+        st.dataframe(anchor_df, hide_index=True, use_container_width=True, height=180)
+
+    # Projection summary — anchor model vs main model
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    pc1.metric("Anchor Total", f"{expected_total:.1f}",
+               delta=f"{expected_total - model_result['total']:+.1f} vs main")
+    pc2.metric(f"{home} pts (anchor)", f"{expected_h_pts:.1f}")
+    pc3.metric(f"{away} pts (anchor)", f"{expected_a_pts:.1f}")
+    pc4.metric("Anchor pace", f"{game_pace:.1f}",
+               delta=f"{game_pace - model_result['pace']:+.1f} vs main")
+    st.caption(
+        f"Total = pace × (ORTG_h + ORTG_a) / 100 = {game_pace:.1f} × "
+        f"({h_ortg_adj:.1f} + {a_ortg_adj:.1f}) / 100 = {expected_total:.1f}. "
+        f"Anchor model uses regressed team stats; main model uses rotation × RAPM."
+    )
+
+
+def _render_bottom_up_rollup(home: str, away: str,
+                              home_lineup: dict, away_lineup: dict,
+                              store: pd.DataFrame) -> None:
+    """Per-team player breakdown — minutes share × RAPM contribution."""
+    st.subheader("Bottom-up RAPM rollup")
+    st.caption("Per-player oRAPM/dRAPM weighted by minutes share. "
+               "Contribution = (mins / 40) × RAPM.")
+
+    def _team_rollup(team: str, lineup: dict[int, float]) -> pd.DataFrame:
+        rows = []
+        for pid, mins in lineup.items():
+            r = store[store["player_id"] == pid]
+            if r.empty:
+                continue
+            r = r.iloc[0]
+            mp_share = mins / 40.0
+            o = float(r.get("orapm", 0) or 0)
+            d = float(r.get("drapm", 0) or 0)
+            rows.append({
+                "Player":     r.get("player_name", str(pid)),
+                "Mins":       round(mins, 1),
+                "MP share":   round(mp_share, 3),
+                "oRAPM":      round(o, 2),
+                "dRAPM":      round(d, 2),
+                "Net RAPM":   round(o + d, 2),
+                "o-contrib":  round(o * mp_share, 2),
+                "d-contrib":  round(d * mp_share, 2),
+                "Net contrib": round((o + d) * mp_share, 2),
+            })
+        return pd.DataFrame(rows).sort_values("Mins", ascending=False).reset_index(drop=True)
+
+    h_roll = _team_rollup(home, home_lineup)
+    a_roll = _team_rollup(away, away_lineup)
+
+    lc, rc = st.columns(2)
+    with lc:
+        st.markdown(team_badge(home, "1.0rem"), unsafe_allow_html=True)
+        if not h_roll.empty:
+            tots = h_roll[["o-contrib", "d-contrib", "Net contrib", "Mins"]].sum()
+            st.dataframe(h_roll, hide_index=True, use_container_width=True,
+                         height=min(400, 40 + 35 * len(h_roll)))
+            st.caption(f"Σ o-contrib: {tots['o-contrib']:+.2f}   "
+                       f"Σ d-contrib: {tots['d-contrib']:+.2f}   "
+                       f"Σ net: {tots['Net contrib']:+.2f}   "
+                       f"Σ mins: {tots['Mins']:.0f}/40")
+    with rc:
+        st.markdown(team_badge(away, "1.0rem"), unsafe_allow_html=True)
+        if not a_roll.empty:
+            tots = a_roll[["o-contrib", "d-contrib", "Net contrib", "Mins"]].sum()
+            st.dataframe(a_roll, hide_index=True, use_container_width=True,
+                         height=min(400, 40 + 35 * len(a_roll)))
+            st.caption(f"Σ o-contrib: {tots['o-contrib']:+.2f}   "
+                       f"Σ d-contrib: {tots['d-contrib']:+.2f}   "
+                       f"Σ net: {tots['Net contrib']:+.2f}   "
+                       f"Σ mins: {tots['Mins']:.0f}/40")
+
+
+# ── HTH RAPM blend helpers ──────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def _load_hth_rapm() -> pd.DataFrame:
+    """Load helpthehelper RAPM keyed by PLAYER_ID."""
+    from pathlib import Path
+    p = Path(__file__).parent / "data" / "hth_players_2026.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_csv(p)
+
+
+def _blend_store_with_hth(store: pd.DataFrame, weight: float) -> pd.DataFrame:
+    """Replace orapm/drapm in store with weight*ours + (1-weight)*HTH for players
+    that exist in both. Players only in one source keep their original values."""
+    if weight >= 1.0:
+        return store
+    hth = _load_hth_rapm()
+    if hth.empty:
+        return store
+    hth = hth[["PLAYER_ID", "ORAPM", "DRAPM"]].rename(
+        columns={"PLAYER_ID": "player_id", "ORAPM": "hth_orapm", "DRAPM": "hth_drapm"}
+    )
+    out = store.merge(hth, on="player_id", how="left")
+    mask = out["hth_orapm"].notna()
+    out.loc[mask, "orapm"] = (
+        weight * out.loc[mask, "orapm"].fillna(0)
+        + (1 - weight) * out.loc[mask, "hth_orapm"]
+    )
+    out.loc[mask, "drapm"] = (
+        weight * out.loc[mask, "drapm"].fillna(0)
+        + (1 - weight) * out.loc[mask, "hth_drapm"]
+    )
+    return out.drop(columns=["hth_orapm", "hth_drapm"])
+
+
 def tab_game(store: pd.DataFrame, pace_cache: pd.DataFrame) -> None:
     st.header("Game Projector")
 
@@ -814,6 +1437,34 @@ def tab_game(store: pd.DataFrame, pace_cache: pd.DataFrame) -> None:
         if pace_lock:
             locked_pace = st.number_input("Pace", min_value=60, max_value=95,
                                           value=mx.PACE_DEFAULT, step=1, key="locked_pace")
+
+    # HTH blend control
+    with st.expander("RAPM source blend (HTH)", expanded=False):
+        hth_df = _load_hth_rapm()
+        bc1, bc2 = st.columns([1, 2])
+        with bc1:
+            hth_weight = st.slider(
+                "Ours weight (1.0 = pure ours, 0.0 = pure HTH)",
+                0.0, 1.0, 1.0, step=0.05, key="hth_weight",
+                help="Blend our RAPM with helpthehelper.vercel.app 2026 RAPM. "
+                     "Players present in both get blended; players in only one source keep their values.",
+            )
+        with bc2:
+            if not hth_df.empty:
+                n_hth = len(hth_df)
+                store_pids = set(store["player_id"].astype("Int64").dropna().tolist())
+                hth_pids = set(hth_df["PLAYER_ID"].astype("Int64").dropna().tolist()) if "PLAYER_ID" in hth_df.columns else set()
+                overlap = len(store_pids & hth_pids)
+                st.markdown(
+                    f"**HTH 2026 RAPM**: {n_hth} players  ·  "
+                    f"overlap with our store: **{overlap}**  ·  "
+                    f"only-in-HTH: {len(hth_pids - store_pids)}  ·  "
+                    f"only-in-ours: {len(store_pids - hth_pids)}"
+                )
+            else:
+                st.warning("HTH data not yet fetched — hit Refresh in sidebar.")
+        if hth_weight < 1.0:
+            store = _blend_store_with_hth(store, hth_weight)
 
     st.divider()
 
@@ -878,6 +1529,40 @@ def tab_game(store: pd.DataFrame, pace_cache: pd.DataFrame) -> None:
         d3.metric(f"{home_team} dRAPM", f"{result['home_drapm']:+.2f}")
         d4.metric(f"{away_team} oRAPM", f"{result['away_orapm']:+.2f}")
         d4.metric(f"{away_team} dRAPM", f"{result['away_drapm']:+.2f}")
+
+        # Pace × ORTG decomposition
+        st.markdown("**Lineup ORTG / DRTG (pts per 100 poss)**")
+        rt1, rt2, rt3, rt4 = st.columns(4)
+        rt1.metric(f"{home_team} ORTG", f"{result['home_off_rtg']:.1f}",
+                   delta=f"{result['home_off_rtg'] - result['league_ortg']:+.1f} vs lg")
+        rt2.metric(f"{home_team} DRTG", f"{result['home_def_rtg']:.1f}",
+                   delta=f"{result['home_def_rtg'] - result['league_ortg']:+.1f}",
+                   delta_color="inverse")
+        rt3.metric(f"{away_team} ORTG", f"{result['away_off_rtg']:.1f}",
+                   delta=f"{result['away_off_rtg'] - result['league_ortg']:+.1f}")
+        rt4.metric(f"{away_team} DRTG", f"{result['away_def_rtg']:.1f}",
+                   delta=f"{result['away_def_rtg'] - result['league_ortg']:+.1f}",
+                   delta_color="inverse")
+        st.caption(
+            f"Projection: pace × adj ORTG ÷ 100. "
+            f"League ORTG = {result['league_ortg']:.1f}. "
+            f"Adj ORTG = own offense + (opp defense − league avg). "
+            f"{home_team} adj = {result['home_adj_ortg']:.1f} × {result['pace']:.1f} ÷ 100 = "
+            f"{result['home_pts']:.1f} pts. "
+            f"{away_team} adj = {result['away_adj_ortg']:.1f} × {result['pace']:.1f} ÷ 100 = "
+            f"{result['away_pts']:.1f} pts."
+        )
+
+    # ── Pace & ORTG Anchors ──────────────────────────────────────────────
+    st.divider()
+    _render_anchors_panel(home_team, away_team, result, neutral)
+
+    # ── Bottom-up RAPM rollup ────────────────────────────────────────────
+    _render_bottom_up_rollup(
+        home_team, away_team,
+        home_lineup, away_lineup,
+        session_store,
+    )
 
     # Save rotation button
     scol1, scol2, _ = st.columns([1, 1, 4])
@@ -1314,65 +1999,79 @@ def tab_game_log() -> None:
     view["home"] = split[0].str.strip()
     view["away"] = split[1].str.strip() if 1 in split.columns else ""
 
-    # Team filter — pull unique teams from home/away columns
     all_teams = sorted(set(view["home"].dropna()) | set(view["away"].dropna()))
     sel_team = fc2.selectbox("Team", ["All"] + all_teams)
-    if sel_team != "All":
-        view = view[(view["home"] == sel_team) | (view["away"] == sel_team)]
+    sel_opp = fc3.selectbox("Opponent", ["All"] + all_teams)
+    sel_site = fc4.radio("Site", ["All", "H", "A"], horizontal=True)
 
-    # Home/Away toggle
-    perspective = fc3.radio("View as", ["Home", "Away", "Both"], horizontal=True)
-    search = fc4.text_input("Search team")
-    if search:
-        view = view[
-            view["home"].str.contains(search, case=False, na=False) |
-            view["away"].str.contains(search, case=False, na=False)
-        ]
-
-    # Team badge label when filtered
-    if sel_team != "All":
-        st.markdown(team_badge(sel_team), unsafe_allow_html=True)
-    st.caption(f"{len(view)} games")
-
-    # Helper: scale fraction cols to whole-number percentages for display
+    # Convert fractions to percentages once
     PCT_SCALE = ["h_efg", "h_tov", "h_oreb", "h_ftr",
                  "a_efg", "a_tov", "a_oreb", "a_ftr"]
-    view = view.copy()
     for c in PCT_SCALE:
         if c in view.columns:
             view[c] = (view[c] * 100).round(1)
 
-    if perspective == "Home":
-        disp = view[["game_date", "home", "away", "home_pts", "away_pts", "margin", "pace",
-                      "h_efg", "h_tov", "h_oreb", "h_ftr",
-                      "h_fga", "h_tpa", "h_fta", "h_oreb_n", "h_tov_n"]].rename(columns={
-            "home": "Home", "away": "Away",
-            "home_pts": "Pts", "away_pts": "Opp",
-            "h_efg": "eFG%", "h_tov": "TOV%", "h_oreb": "OREB%", "h_ftr": "FTR",
-            "h_fga": "FGA", "h_tpa": "3PA", "h_fta": "FTA",
-            "h_oreb_n": "OREB", "h_tov_n": "TOV",
-        })
-    elif perspective == "Away":
-        disp = view[["game_date", "home", "away", "away_pts", "home_pts", "pace",
-                      "a_efg", "a_tov", "a_oreb", "a_ftr",
-                      "a_fga", "a_tpa", "a_fta", "a_oreb_n", "a_tov_n"]].rename(columns={
-            "home": "Home", "away": "Away",
-            "away_pts": "Pts", "home_pts": "Opp",
-            "a_efg": "eFG%", "a_tov": "TOV%", "a_oreb": "OREB%", "a_ftr": "FTR",
-            "a_fga": "FGA", "a_tpa": "3PA", "a_fta": "FTA",
-            "a_oreb_n": "OREB", "a_tov_n": "TOV",
-        })
-        disp["margin"] = disp["Pts"] - disp["Opp"]
-    else:
-        disp = view[["game_date", "home", "away", "home_pts", "away_pts", "margin", "pace",
-                      "h_efg", "h_tov", "h_oreb", "h_ftr",
-                      "a_efg", "a_tov", "a_oreb", "a_ftr"]].rename(columns={
-            "home": "Home", "away": "Away",
-            "h_efg": "H eFG%", "h_tov": "H TOV%", "h_oreb": "H OREB%", "h_ftr": "H FTR",
-            "a_efg": "A eFG%", "a_tov": "A TOV%", "a_oreb": "A OREB%", "a_ftr": "A FTR",
-        })
+    # Per-team-game rows (each game → 2 rows: home perspective + away perspective).
+    # pace = poss normalized to 40-min game; poss = raw counted possessions.
+    extra = ["pace"]
+    if "poss" in view.columns:
+        extra.append("poss")
+    if "ot_periods" in view.columns:
+        extra.append("ot_periods")
+    base_cols = ["game_date", "home", "away"] + extra
+    h = view[base_cols + ["home_pts", "away_pts",
+                            "h_efg", "h_tov", "h_oreb", "h_ftr",
+                            "h_fga", "h_tpa", "h_fta", "h_oreb_n", "h_tov_n"]].copy()
+    h = h.rename(columns={
+        "home": "Team", "away": "Opp",
+        "home_pts": "Pts", "away_pts": "OppPts",
+        "h_efg": "eFG%", "h_tov": "TOV%", "h_oreb": "OREB%", "h_ftr": "FTR",
+        "h_fga": "FGA", "h_tpa": "3PA", "h_fta": "FTA",
+        "h_oreb_n": "OREB", "h_tov_n": "TOV",
+    })
+    h["Site"] = "H"
 
-    disp = disp.sort_values("game_date", ascending=False)
+    a = view[base_cols + ["away_pts", "home_pts",
+                            "a_efg", "a_tov", "a_oreb", "a_ftr",
+                            "a_fga", "a_tpa", "a_fta", "a_oreb_n", "a_tov_n"]].copy()
+    a = a.rename(columns={
+        "away": "Team", "home": "Opp",
+        "away_pts": "Pts", "home_pts": "OppPts",
+        "a_efg": "eFG%", "a_tov": "TOV%", "a_oreb": "OREB%", "a_ftr": "FTR",
+        "a_fga": "FGA", "a_tpa": "3PA", "a_fta": "FTA",
+        "a_oreb_n": "OREB", "a_tov_n": "TOV",
+    })
+    a["Site"] = "A"
+
+    disp = pd.concat([h, a], ignore_index=True)
+    disp["margin"] = disp["Pts"] - disp["OppPts"]
+    if "poss" in disp.columns:
+        disp = disp.rename(columns={"poss": "Poss"})
+    if "pace" in disp.columns:
+        disp = disp.rename(columns={"pace": "Pace"})
+    if "ot_periods" in disp.columns:
+        disp = disp.rename(columns={"ot_periods": "OT"})
+
+    if sel_team != "All":
+        disp = disp[disp["Team"] == sel_team]
+    if sel_opp != "All":
+        disp = disp[disp["Opp"] == sel_opp]
+    if sel_site != "All":
+        disp = disp[disp["Site"] == sel_site]
+
+    # Team badge when filtered
+    if sel_team != "All":
+        st.markdown(team_badge(sel_team), unsafe_allow_html=True)
+    st.caption(f"{len(disp)} team-games")
+
+    # Column order
+    cols = ["game_date", "Team", "Site", "Opp", "Pts", "OppPts", "margin"]
+    if "Pace" in disp.columns: cols.append("Pace")
+    if "Poss" in disp.columns: cols.append("Poss")
+    if "OT" in disp.columns:   cols.append("OT")
+    cols += ["eFG%", "TOV%", "OREB%", "FTR", "FGA", "3PA", "FTA", "OREB", "TOV"]
+    disp = disp[cols].sort_values("game_date", ascending=False)
+
     import streamlit.components.v1 as _stc
     _stc.html(_html_table(disp), height=610, scrolling=False)
 
@@ -1510,6 +2209,90 @@ def tab_ec_historical(store: pd.DataFrame) -> None:
     )
 
 
+# ── Refresh pipeline ─────────────────────────────────────────────────────────
+
+def _refresh_all_data() -> None:
+    """Pull new games (WNBA_RAPM pipeline) + HTH RAPM + sync CSVs + clear cache."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    APP_DIR = Path(__file__).resolve().parent
+    WNBA_RAPM_DIR = APP_DIR.parent / "WNBA_RAPM"
+    refresh_script = WNBA_RAPM_DIR / "refresh_2026.py"
+
+    status = st.empty()
+    progress = st.progress(0)
+    log_box = st.empty()
+
+    # Step 1: Refresh 2026 PBP + rebuild analysis CSVs (pace_stats, ft_decomp, stints_rich)
+    status.info("Step 1/4 — Pulling 2026 games & rebuilding analysis (slow API)…")
+    if refresh_script.exists():
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", str(refresh_script)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                cwd=str(WNBA_RAPM_DIR),
+            )
+            tail_lines: list[str] = []
+            for line in proc.stdout:
+                tail_lines.append(line.rstrip())
+                # Show the last ~10 lines as a scrolling log
+                log_box.code("\n".join(tail_lines[-12:]), language="text")
+            proc.wait(timeout=600)
+            if proc.returncode != 0:
+                st.warning(f"refresh_2026.py exited code {proc.returncode}")
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            st.error("refresh_2026.py timed out at 10 min.")
+    else:
+        st.warning(f"refresh_2026.py not found at {refresh_script}")
+    log_box.empty()
+    progress.progress(30)
+
+    # Step 2: Rebuild game_log (Five Factors per game, 2017–2026)
+    status.info("Step 2/4 — Rebuilding game log…")
+    try:
+        import game_log as glm
+        glm.build(verbose=False)
+    except Exception as exc:
+        st.warning(f"Game log rebuild failed: {exc}")
+    progress.progress(55)
+
+    # Step 3: Fetch HTH RAPM
+    status.info("Step 3/4 — Fetching HTH RAPM…")
+    try:
+        import fetch_hth
+        fetch_hth.fetch_and_save(2026)
+    except Exception as exc:
+        st.warning(f"HTH fetch failed: {exc}")
+    progress.progress(80)
+
+    # Step 4: Mirror CSVs into app data folder
+    status.info("Step 4/5 — Syncing CSVs into app data folder…")
+    try:
+        import sync_data
+        sync_data.sync(verbose=False)
+    except Exception as exc:
+        st.error(f"Data sync failed: {exc}")
+        return
+    progress.progress(90)
+
+    # Step 5: Rebuild player store with freshly-derived 2026 minutes
+    status.info("Step 5/5 — Rebuilding player store (2026 minutes)…")
+    try:
+        import player_store as _ps
+        _ps.build()
+    except Exception as exc:
+        st.warning(f"Player store rebuild failed: {exc}")
+    progress.progress(100)
+
+    status.success("✅ Data refresh complete. Reloading…")
+    st.cache_data.clear()
+    st.rerun()
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -1518,17 +2301,21 @@ def main() -> None:
     store = get_store()
     pace_cache = get_pace_cache()
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Game", "Season", "Roster", "Performance", "Game Log", "EC Historical"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["Game", "Roster", "Performance", "Game Log",
+         "League Dashboard", "EC Historical"]
+    )
     with tab1:
         tab_game(store, pace_cache)
     with tab2:
-        tab_season()
-    with tab3:
         tab_roster(store)
-    with tab4:
+    with tab3:
         tab_performance()
-    with tab5:
+    with tab4:
         tab_game_log()
+    with tab5:
+        import league_dashboard
+        league_dashboard.render()
     with tab6:
         tab_ec_historical(store)
 
@@ -1538,21 +2325,26 @@ def main() -> None:
         st.markdown(f"**Teams:** {store['team_abbr'].nunique()}")
         overrides = roster_mod.load_roster_overrides()
         st.markdown(f"**Active overrides:** {len(overrides)}")
-        if st.button("Rebuild player store"):
-            import player_store as ps
-            ps.build()
-            st.cache_data.clear()
-            st.rerun()
-        if st.button("Rebuild pace cache"):
-            pace_module.build_pace_cache()
-            st.cache_data.clear()
-            st.rerun()
-        if st.button("Run daily ingest"):
-            import ingest
-            with st.spinner("Running ingest..."):
-                ingest.run(skip_ec=True)
-            st.cache_data.clear()
-            st.rerun()
+
+        if st.button("🔄 Refresh all data", type="primary"):
+            _refresh_all_data()
+
+        with st.expander("Advanced rebuilds"):
+            if st.button("Rebuild player store"):
+                import player_store as ps
+                ps.build()
+                st.cache_data.clear()
+                st.rerun()
+            if st.button("Rebuild pace cache"):
+                pace_module.build_pace_cache()
+                st.cache_data.clear()
+                st.rerun()
+            if st.button("Run daily ingest"):
+                import ingest
+                with st.spinner("Running ingest..."):
+                    ingest.run(skip_ec=True)
+                st.cache_data.clear()
+                st.rerun()
 
 
 if __name__ == "__main__":

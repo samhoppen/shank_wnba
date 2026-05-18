@@ -12,15 +12,67 @@ Lineup format:  {player_id: minutes_share}
 import numpy as np
 from scipy.stats import norm
 import pandas as pd
+from pathlib import Path
 from typing import Dict, Optional
 import player_store
 import pace as pace_module
 
-# ── Default game constants ──────────────────────────────────────────────────
-PACE_DEFAULT = 78       # fallback if pace cache unavailable
+# ── Default game constants (calibrated to 2026 league averages, per-40) ────
+PACE_DEFAULT = 80       # 2026 league pace per 40 min (poss normalized for OT)
 HCA = 2.2               # home-court advantage, points
-BASE_PTS = 79           # league-average team scoring
-SIGMA_MARGIN = 10.5     # std dev of game margin for win prob
+LEAGUE_ORTG = 107.3     # 2026 league ORTG (pts per 100 poss) — read from pace_stats if available
+BASE_PTS = round(LEAGUE_ORTG * PACE_DEFAULT / 100, 1)  # = league pts/team-game
+SIGMA_MARGIN = 12.5     # std dev of margin around projected spread (WNBA empirical ~13)
+
+# Cache the pace_stats DataFrame at module load
+_PACE_STATS_PATH = Path(__file__).parent / "data" / "pace_stats.csv"
+_PACE_STATS_CACHE: Optional[pd.DataFrame] = None
+
+
+def _load_pace_stats() -> pd.DataFrame:
+    global _PACE_STATS_CACHE
+    if _PACE_STATS_CACHE is None:
+        if _PACE_STATS_PATH.exists():
+            _PACE_STATS_CACHE = pd.read_csv(_PACE_STATS_PATH)
+        else:
+            _PACE_STATS_CACHE = pd.DataFrame()
+    return _PACE_STATS_CACHE
+
+
+def _league_ortg() -> float:
+    """Live 2026 league ORTG from pace_stats.csv (falls back to LEAGUE_ORTG)."""
+    df = _load_pace_stats()
+    if df.empty:
+        return LEAGUE_ORTG
+    sub = df[df["season"] == "2026_first8"]
+    if sub.empty or "ortg" not in sub.columns:
+        return LEAGUE_ORTG
+    return float(sub["ortg"].mean())
+
+
+def _team_pace_regressed(team_id: int, season: str = "2026", k: float = 5.0) -> float:
+    """Bayesian-shrunk team pace from counted PBP possessions."""
+    df = _load_pace_stats()
+    if df.empty:
+        return PACE_DEFAULT
+    season_key = "2026_first8" if str(season) == "2026" else "2025_full"
+    sub = df[df["season"] == season_key]
+    if sub.empty:
+        return PACE_DEFAULT
+    league_mean = float(sub["pace"].mean())
+    team_rows = sub[sub["team_id"] == team_id]
+    if team_rows.empty:
+        return league_mean
+    n = len(team_rows)
+    observed = float(team_rows["pace"].mean())
+    return (n * observed + k * league_mean) / (n + k)
+
+
+def predict_game_pace_v2(home_team_id: int, away_team_id: int, k: float = 5.0) -> float:
+    """Predicted game pace = avg of home + away regressed team paces."""
+    h = _team_pace_regressed(home_team_id, "2026", k)
+    a = _team_pace_regressed(away_team_id, "2026", k)
+    return round((h + a) / 2, 1)
 
 TEAM_ID_MAP = {
     1611661313: "NYL",
@@ -32,10 +84,12 @@ TEAM_ID_MAP = {
     1611661323: "CON",
     1611661324: "MIN",
     1611661325: "IND",
+    1611661327: "POR",   # Portland Fire (NBA Stats tricode = PDX)
     1611661328: "SEA",
     1611661329: "CHI",
     1611661330: "ATL",
     1611661331: "GSV",
+    1611661332: "TOR",   # Toronto Tempo
 }
 ABBR_TO_TEAM_ID = {v: k for k, v in TEAM_ID_MAP.items()}
 
@@ -82,29 +136,52 @@ def project_matchup(
     if store is None:
         store = player_store.load()
 
-    # Dynamic pace prediction
+    # Dynamic pace prediction — v2 uses pace_stats.csv (counted possessions,
+    # includes 2026). Falls back to legacy pace_module on failure.
     if pace is None:
-        try:
-            if pace_cache is None:
-                pace_cache = pace_module.load_pace_cache()
-            if home_team_id and away_team_id:
-                pace = pace_module.predict_game_pace(
-                    home_lineup, away_lineup,
-                    home_team_id, away_team_id,
-                    cache=pace_cache,
-                )
-            else:
-                pace = PACE_DEFAULT
-        except Exception:
+        if home_team_id and away_team_id:
+            try:
+                pace = predict_game_pace_v2(home_team_id, away_team_id)
+            except Exception:
+                try:
+                    if pace_cache is None:
+                        pace_cache = pace_module.load_pace_cache()
+                    pace = pace_module.predict_game_pace(
+                        home_lineup, away_lineup,
+                        home_team_id, away_team_id,
+                        cache=pace_cache,
+                    )
+                except Exception:
+                    pace = PACE_DEFAULT
+        else:
             pace = PACE_DEFAULT
 
     h_orapm, h_drapm = _weighted_rapm(home_lineup, store)
     a_orapm, a_drapm = _weighted_rapm(away_lineup, store)
 
-    home_pts = base_pts + (h_orapm - a_drapm) * pace / 100
-    away_pts = base_pts + (a_orapm - h_drapm) * pace / 100
+    # ── Pace × ORTG decomposition ────────────────────────────────────────────
+    # RAPM convention: oRAPM positive = better offense (pts added per 100 poss);
+    # dRAPM positive = better defense (pts prevented per 100 poss).
+    league_ortg = _league_ortg()
+    home_off_rtg = league_ortg + h_orapm           # lineup's expected ORTG
+    home_def_rtg = league_ortg - h_drapm           # lineup's expected DRTG (opp pts/100)
+    away_off_rtg = league_ortg + a_orapm
+    away_def_rtg = league_ortg - a_drapm
+    # Opponent-adjusted ORTG: each side's offense vs the other side's defense,
+    # relative to league. (Algebra collapses to LEAGUE_ORTG + h_oRAPM - a_dRAPM.)
+    home_adj_ortg = home_off_rtg + (away_def_rtg - league_ortg)
+    away_adj_ortg = away_off_rtg + (home_def_rtg - league_ortg)
 
-    spread = home_pts - away_pts + hca          # positive = home favored
+    home_pts_pre = home_adj_ortg * pace / 100
+    away_pts_pre = away_adj_ortg * pace / 100
+    # Distribute HCA evenly across the two teams' displayed totals so
+    # home_pts + hca/2 and away_pts - hca/2 sum to the same total and the
+    # spread (home - away) equals (pre + hca). Otherwise the displayed
+    # winning team and the spread disagreed when HCA flipped the result.
+    home_pts = home_pts_pre + hca / 2
+    away_pts = away_pts_pre - hca / 2
+
+    spread = home_pts - away_pts          # positive = home favored
     total = home_pts + away_pts
 
     win_prob_home = norm.cdf(spread / SIGMA_MARGIN)
@@ -118,6 +195,13 @@ def project_matchup(
         "home_drapm": round(h_drapm, 2),
         "away_orapm": round(a_orapm, 2),
         "away_drapm": round(a_drapm, 2),
+        "home_off_rtg": round(home_off_rtg, 1),
+        "home_def_rtg": round(home_def_rtg, 1),
+        "away_off_rtg": round(away_off_rtg, 1),
+        "away_def_rtg": round(away_def_rtg, 1),
+        "home_adj_ortg": round(home_adj_ortg, 1),
+        "away_adj_ortg": round(away_adj_ortg, 1),
+        "league_ortg": round(league_ortg, 1),
         "win_prob_home": round(win_prob_home, 3),
         "pace": pace,
     }

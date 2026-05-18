@@ -79,14 +79,82 @@ def _load_ec_2026() -> pd.DataFrame:
     return pd.DataFrame(columns=["player_name_ec", "oec", "dec", "ec"])
 
 
+def _derive_2026_minutes() -> pd.DataFrame:
+    """Derive per-player 2026 minutes from analysis_player_stats.csv.
+
+    The raw player_minutes.csv has scrambled values for 2026 (e.g. 58 min/game).
+    We re-derive from the clean possession data:
+
+        minutes_per_game ≈ (on_court_off_poss / team_off_poss) * 40
+        total_minutes    = Σ minutes_per_game across games
+
+    Returns DataFrame: player_id | player_name | team_abbr | minutes | minutes_per_game
+    """
+    from pathlib import Path
+    p = Path(__file__).parent / "data" / "analysis_player_stats.csv"
+    if not p.exists():
+        return pd.DataFrame(columns=["player_id", "player_name", "team_abbr",
+                                      "minutes", "minutes_per_game"])
+    ps = pd.read_csv(p)
+    ps = ps[ps["season"] == "2026_first8"].copy()
+    if ps.empty:
+        return pd.DataFrame(columns=["player_id", "player_name", "team_abbr",
+                                      "minutes", "minutes_per_game"])
+
+    # poss column = team's total offensive possessions for that game (denominator)
+    # on_court_poss = how many of those the player was on the floor for
+    ps["min_in_game"] = (ps["on_court_poss"] / ps["poss"].replace(0, np.nan)) * 40.0
+
+    # Only count games where the player actually has on-floor data
+    played = ps.dropna(subset=["on_court_poss", "poss", "min_in_game"]).copy()
+    played = played[played["on_court_poss"] > 0]
+
+    out = (played.groupby(["person_id", "player_name", "team"])
+                  .agg(games=("game_id", "nunique"),
+                       minutes=("min_in_game", "sum"))
+                  .reset_index()
+                  .rename(columns={"person_id": "player_id", "team": "team_abbr"}))
+    out["minutes_per_game"] = out["minutes"] / out["games"].replace(0, np.nan)
+    out = out[["player_id", "player_name", "team_abbr", "minutes", "minutes_per_game"]]
+    return out
+
+
 def _load_team_map_2026() -> pd.DataFrame:
-    """Return player_id -> team_abbr mapping using most recent season per player."""
+    """Return player_id -> team_abbr mapping + minutes.
+
+    Strategy:
+      1. Get 2026 minutes from analysis_player_stats (clean per-poss derivation)
+      2. For players without 2026 analysis data, fall back to 2025 player_minutes
+         (the legacy file is in seconds-scale, divide by 60)
+      3. Skip the legacy player_minutes.csv 2026 rows entirely — they have a
+         different 2x scaling bug we can't reliably correct.
+    """
     pm = pd.read_csv(PLAYER_MINUTES)
-    # Sort by season descending then minutes descending, dedupe on player_id
-    # This gives each player their most recent season's team regardless of gaps
-    return (pm.sort_values(["season", "minutes"], ascending=[False, False])
-              .drop_duplicates("player_id")[["player_id", "team_abbr",
-                                             "minutes", "minutes_per_game"]])
+    pm = pm[pm["season"] < 2026].copy()  # skip buggy 2026 legacy rows
+    # Legacy 2017–2025 rows are seconds-scale: divide by 60 if min/g > 40 (impossible).
+    bad = pm["minutes_per_game"] > 40
+    pm.loc[bad, "minutes_per_game"] /= 60.0
+    pm.loc[bad, "minutes"] /= 60.0
+    # Defensive cap — if still >40 after /60, the row is corrupt; null it out.
+    still_bad = pm["minutes_per_game"] > 40
+    pm.loc[still_bad, ["minutes", "minutes_per_game"]] = float("nan")
+    legacy_fallback = (
+        pm.sort_values(["season", "minutes"], ascending=[False, False])
+          .drop_duplicates("player_id")
+          [["player_id", "team_abbr", "minutes", "minutes_per_game"]]
+    )
+
+    # 2026 derived minutes (preferred — clean possession-based derivation)
+    m26 = _derive_2026_minutes()
+    if m26.empty:
+        return legacy_fallback
+
+    m26_pids = set(m26["player_id"])
+    fb_only = legacy_fallback[~legacy_fallback["player_id"].isin(m26_pids)]
+    return pd.concat(
+        [m26[["player_id", "team_abbr", "minutes", "minutes_per_game"]], fb_only],
+        ignore_index=True,
+    )
 
 
 def _fuzzy_join_ec(store: pd.DataFrame, ec: pd.DataFrame) -> pd.DataFrame:
