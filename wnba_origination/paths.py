@@ -3,13 +3,24 @@ import os
 from pathlib import Path
 
 HERE = Path(__file__).parent
+REPO_ROOT = HERE.parent
 DATA = HERE / "data"
 BDB_DIR = DATA / "bigdataball"
 
+# Default: the `wnba_rapm` git submodule at the repo root. Override with
+# WNBA_RAPM_DIR env var to point at a different copy of the wnba_data tree.
 RAPM_DIR = Path(
-    os.getenv("WNBA_RAPM_DIR",
-              r"C:/Users/shank.subramani_betf/Desktop/ShotsDashboard/WNBA_RAPM/wnba_data")
-)
+    os.getenv("WNBA_RAPM_DIR", str(REPO_ROOT / "wnba_rapm" / "wnba_data"))
+).resolve()
+
+# Raw PBP JSON is excluded from the submodule (~400 MB). Default to a sibling
+# cache directory populated by scripts/fetch_pbp.py; fall back to the
+# submodule's raw_pbp/ if a user opted to place JSON there.
+_RAW_PBP_IN_SUBMODULE = RAPM_DIR / "raw_pbp"
+_RAW_PBP_IN_CACHE = Path(
+    os.getenv("WNBA_RAW_PBP_DIR", str(REPO_ROOT / "wnba_rapm_cache" / "raw_pbp"))
+).resolve()
+RAW_PBP_DIR = _RAW_PBP_IN_SUBMODULE if _RAW_PBP_IN_SUBMODULE.exists() else _RAW_PBP_IN_CACHE
 
 EC_ALL_SEASONS = Path(r"C:/Users/shank.subramani_betf/Desktop/wnba_ec_all_seasons.csv")
 EC_SCRAPER = Path(r"C:/Users/shank.subramani_betf/Desktop/wnba_ec_all.py")

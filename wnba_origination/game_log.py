@@ -19,16 +19,16 @@ import numpy as np
 from pathlib import Path
 from glob import glob
 
-from paths import RAPM_DIR, DATA, stints as stints_path
+from paths import RAPM_DIR, REPO_ROOT, DATA, RAW_PBP_DIR, stints as stints_path
 
-RAW_PBP_DIR = RAPM_DIR / "raw_pbp"
 GAME_LOG_CACHE = DATA / "game_log.csv"
 
-# Pull in the PBP possession walker for accurate pace counts
+# Pull in the PBP possession walker from the wnba_rapm submodule for accurate
+# pace counts. Falls back to the box-score formula if the symbol isn't found.
 import sys as _sys
-_sys.path.insert(0, str(RAPM_DIR.parent / "analysis"))
+_sys.path.insert(0, str(REPO_ROOT / "wnba_rapm"))
 try:
-    from dal_poss_breakdown import walk_possessions
+    from pbp_shares import walk_possessions
 except ImportError:
     walk_possessions = None
 

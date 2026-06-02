@@ -135,7 +135,7 @@ def _last_game_minutes(team_abbr: str, store: pd.DataFrame) -> pd.DataFrame:
     """
     import json as _json
     from pathlib import Path
-    from paths import RAPM_DIR
+    from paths import RAPM_DIR, RAW_PBP_DIR
     from matchup import ABBR_TO_TEAM_ID
 
     team_id = ABBR_TO_TEAM_ID.get(team_abbr)
@@ -156,7 +156,7 @@ def _last_game_minutes(team_abbr: str, store: pd.DataFrame) -> pd.DataFrame:
     # Try the most recent game first, fall back to earlier ones if PBP missing
     pres = mins = None
     chosen_gid = None
-    raw_dir = RAPM_DIR / "raw_pbp"
+    raw_dir = RAW_PBP_DIR
     for _, grow in team_games.iterrows():
         gid = str(grow["game_id"]).zfill(10)
         pbp_path = raw_dir / f"{gid}_pbp.json"
@@ -702,7 +702,7 @@ def _recent_game_presence(team_abbr: str, n: int = 5, year: int | None = None) -
     """
     import json as _json
     import re as _re
-    from paths import RAPM_DIR
+    from paths import RAPM_DIR, RAW_PBP_DIR
     from matchup import ABBR_TO_TEAM_ID
 
     team_id = ABBR_TO_TEAM_ID.get(team_abbr)
@@ -730,7 +730,7 @@ def _recent_game_presence(team_abbr: str, n: int = 5, year: int | None = None) -
     if team_games.empty:
         return []
 
-    raw_pbp_dir = RAPM_DIR / "raw_pbp"
+    raw_pbp_dir = RAW_PBP_DIR
 
     results = []
     for _, grow in team_games.iterrows():
@@ -804,8 +804,8 @@ def _recent_game_presence(team_abbr: str, n: int = 5, year: int | None = None) -
 def _game_box_score(game_id: str) -> pd.DataFrame:
     """Parse raw PBP and return per-player box score (pts/fgm/fga/3pm/3pa/ftm/fta/reb/ast/tov)."""
     import json as _json, re as _re
-    from paths import RAPM_DIR
-    pbp_path = RAPM_DIR / "raw_pbp" / f"{game_id}_pbp.json"
+    from paths import RAW_PBP_DIR
+    pbp_path = RAW_PBP_DIR / f"{game_id}_pbp.json"
     if not pbp_path.exists():
         return pd.DataFrame()
     with open(pbp_path, encoding="utf-8") as f:
@@ -2211,66 +2211,106 @@ def tab_ec_historical(store: pd.DataFrame) -> None:
 
 # ── Refresh pipeline ─────────────────────────────────────────────────────────
 
-def _refresh_all_data() -> None:
-    """Pull new games (WNBA_RAPM pipeline) + HTH RAPM + sync CSVs + clear cache."""
+def _stream_subprocess(cmd: list, cwd, log_box, timeout: int = 900) -> int:
+    """Run a subprocess streaming the tail of stdout into log_box. Returns rc."""
     import subprocess
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, cwd=str(cwd),
+        )
+        tail: list[str] = []
+        for line in proc.stdout:
+            tail.append(line.rstrip())
+            log_box.code("\n".join(tail[-12:]), language="text")
+        proc.wait(timeout=timeout)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return -1
+
+
+def _refresh_all_data() -> None:
+    """Run the full pipeline: stints → RAPM → PBP → analysis → caches."""
     import sys
     from pathlib import Path
 
     APP_DIR = Path(__file__).resolve().parent
-    WNBA_RAPM_DIR = APP_DIR.parent / "WNBA_RAPM"
-    refresh_script = WNBA_RAPM_DIR / "refresh_2026.py"
+    REPO_ROOT = APP_DIR.parent
+    SUBMODULE = REPO_ROOT / "wnba_rapm"
+    SCRIPTS = APP_DIR / "scripts"
 
     status = st.empty()
     progress = st.progress(0)
     log_box = st.empty()
+    year = "2026"
 
-    # Step 1: Refresh 2026 PBP + rebuild analysis CSVs (pace_stats, ft_decomp, stints_rich)
-    status.info("Step 1/4 — Pulling 2026 games & rebuilding analysis (slow API)…")
-    if refresh_script.exists():
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, "-u", str(refresh_script)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-                cwd=str(WNBA_RAPM_DIR),
-            )
-            tail_lines: list[str] = []
-            for line in proc.stdout:
-                tail_lines.append(line.rstrip())
-                # Show the last ~10 lines as a scrolling log
-                log_box.code("\n".join(tail_lines[-12:]), language="text")
-            proc.wait(timeout=600)
-            if proc.returncode != 0:
-                st.warning(f"refresh_2026.py exited code {proc.returncode}")
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            st.error("refresh_2026.py timed out at 10 min.")
+    # Step 1: Update stints (new repo's script)
+    status.info("Step 1/7 — Updating stints from stats.nba.com (slow)…")
+    if SUBMODULE.exists():
+        rc = _stream_subprocess(
+            [sys.executable, "-u", "update_stints.py", "--season", year],
+            cwd=SUBMODULE, log_box=log_box,
+        )
+        if rc != 0:
+            st.warning(f"update_stints.py exited code {rc}")
     else:
-        st.warning(f"refresh_2026.py not found at {refresh_script}")
+        st.warning(f"wnba_rapm submodule not found at {SUBMODULE}")
+    log_box.empty()
+    progress.progress(15)
+
+    # Step 2: Refit RAPM via the notebook
+    status.info("Step 2/7 — Refitting RAPM (notebook execute)…")
+    rc = _stream_subprocess(
+        [sys.executable, "-m", "jupyter", "nbconvert",
+         "--to", "notebook", "--execute", "--inplace",
+         "rapm_reproducible.ipynb"],
+        cwd=SUBMODULE, log_box=log_box, timeout=1800,
+    )
+    if rc != 0:
+        st.warning(f"RAPM notebook exited code {rc} (continuing)")
     log_box.empty()
     progress.progress(30)
 
-    # Step 2: Rebuild game_log (Five Factors per game, 2017–2026)
-    status.info("Step 2/4 — Rebuilding game log…")
+    # Step 3: Fetch raw PBP JSON for new games
+    status.info("Step 3/7 — Fetching raw PBP JSON…")
+    rc = _stream_subprocess(
+        [sys.executable, "-u", str(SCRIPTS / "fetch_pbp.py"), "--year", year],
+        cwd=APP_DIR, log_box=log_box,
+    )
+    if rc != 0:
+        st.warning(f"fetch_pbp.py exited code {rc}")
+    log_box.empty()
+    progress.progress(45)
+
+    # Step 4: Regenerate analysis CSVs
+    status.info("Step 4/7 — Regenerating analysis CSVs…")
+    rc = _stream_subprocess(
+        [sys.executable, "-u", str(SCRIPTS / "regen_analysis.py"),
+         "--year", year, "--append-2025"],
+        cwd=APP_DIR, log_box=log_box,
+    )
+    if rc != 0:
+        st.warning(f"regen_analysis.py exited code {rc}")
+    log_box.empty()
+    progress.progress(60)
+
+    # Step 5: Rebuild game_log
+    status.info("Step 5/7 — Rebuilding game log…")
     try:
         import game_log as glm
         glm.build(verbose=False)
     except Exception as exc:
         st.warning(f"Game log rebuild failed: {exc}")
-    progress.progress(55)
+    progress.progress(75)
 
-    # Step 3: Fetch HTH RAPM
-    status.info("Step 3/4 — Fetching HTH RAPM…")
+    # Step 6: Fetch HTH RAPM + sync CSVs
+    status.info("Step 6/7 — Syncing CSVs + fetching HTH RAPM…")
     try:
         import fetch_hth
         fetch_hth.fetch_and_save(2026)
     except Exception as exc:
         st.warning(f"HTH fetch failed: {exc}")
-    progress.progress(80)
-
-    # Step 4: Mirror CSVs into app data folder
-    status.info("Step 4/5 — Syncing CSVs into app data folder…")
     try:
         import sync_data
         sync_data.sync(verbose=False)
@@ -2279,8 +2319,8 @@ def _refresh_all_data() -> None:
         return
     progress.progress(90)
 
-    # Step 5: Rebuild player store with freshly-derived 2026 minutes
-    status.info("Step 5/5 — Rebuilding player store (2026 minutes)…")
+    # Step 7: Rebuild player store
+    status.info("Step 7/7 — Rebuilding player store…")
     try:
         import player_store as _ps
         _ps.build()
@@ -2291,6 +2331,31 @@ def _refresh_all_data() -> None:
     status.success("✅ Data refresh complete. Reloading…")
     st.cache_data.clear()
     st.rerun()
+
+
+def _quick_ingest() -> None:
+    """Fast incremental path: stints + PBP + analysis, no RAPM refit."""
+    import sys
+    from pathlib import Path
+    APP_DIR = Path(__file__).resolve().parent
+    SUBMODULE = APP_DIR.parent / "wnba_rapm"
+    SCRIPTS = APP_DIR / "scripts"
+    status = st.empty()
+    log_box = st.empty()
+    year = "2026"
+
+    status.info("1/3 — Updating stints…")
+    _stream_subprocess([sys.executable, "-u", "update_stints.py", "--season", year],
+                       cwd=SUBMODULE, log_box=log_box)
+    status.info("2/3 — Fetching raw PBP…")
+    _stream_subprocess([sys.executable, "-u", str(SCRIPTS / "fetch_pbp.py"), "--year", year],
+                       cwd=APP_DIR, log_box=log_box)
+    status.info("3/3 — Regenerating analysis CSVs…")
+    _stream_subprocess([sys.executable, "-u", str(SCRIPTS / "regen_analysis.py"),
+                        "--year", year, "--append-2025"],
+                       cwd=APP_DIR, log_box=log_box)
+    log_box.empty()
+    status.success("Quick ingest done.")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -2339,12 +2404,22 @@ def main() -> None:
                 pace_module.build_pace_cache()
                 st.cache_data.clear()
                 st.rerun()
-            if st.button("Run daily ingest"):
-                import ingest
-                with st.spinner("Running ingest..."):
-                    ingest.run(skip_ec=True)
+            if st.button("Run daily ingest (fast)"):
+                with st.spinner("Running quick ingest..."):
+                    _quick_ingest()
                 st.cache_data.clear()
                 st.rerun()
+            if st.button("Backfill raw PBP cache (slow)"):
+                import sys, subprocess
+                from pathlib import Path
+                APP_DIR = Path(__file__).resolve().parent
+                with st.spinner("Backfilling 2017-2026 PBP cache..."):
+                    subprocess.run(
+                        [sys.executable, str(APP_DIR / "scripts" / "fetch_pbp.py"),
+                         "--years", "2017-2026"],
+                        cwd=str(APP_DIR),
+                    )
+                st.success("Backfill complete.")
 
 
 if __name__ == "__main__":
