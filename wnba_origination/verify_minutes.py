@@ -23,7 +23,7 @@ APP_SRC = (HERE / "app.py").read_text(encoding="utf-8")
 walker_src = APP_SRC[APP_SRC.find("def _game_presence_from_pbp"):APP_SRC.find("def _recent_game_presence")]
 exec(walker_src, globals())
 
-from paths import RAPM_DIR
+from paths import RAPM_DIR, RAW_PBP_DIR
 from matchup import ABBR_TO_TEAM_ID
 
 
@@ -68,8 +68,8 @@ def main():
 
         key = (gid, tid)
         if key not in cache:
-            pbp_path = RAPM_DIR / "raw_pbp" / f"{gid}_pbp.json"
-            sp_path  = RAPM_DIR / "raw_pbp" / f"{gid}_starters.json"
+            pbp_path = RAW_PBP_DIR / f"{gid}_pbp.json"
+            sp_path  = RAW_PBP_DIR / f"{gid}_starters.json"
             if not pbp_path.exists():
                 cache[key] = None
             else:
@@ -96,7 +96,7 @@ def main():
 
         # Find player_id by name in PBP (last-name match)
         # Build a name -> pid lookup from PBP for this team
-        pbp_path = RAPM_DIR / "raw_pbp" / f"{gid}_pbp.json"
+        pbp_path = RAW_PBP_DIR / f"{gid}_pbp.json"
         with open(pbp_path, encoding="utf-8") as f:
             pbp_for_lookup = json.load(f)
         name_to_pid: dict = {}

@@ -1,37 +1,32 @@
 """
-Sync analysis CSVs from WNBA_RAPM/analysis (and wnba_data) into
-wnba_origination/data/. Called from the sidebar Refresh button.
+Sync data files from the wnba_rapm submodule into wnba_origination/data/.
 
-Source of truth for everything analysis-related is WNBA_RAPM. This script
-mirrors the files this app actually reads into a local copy so the app has
-a clean single data folder and doesn't reach across the repo.
+The wnba_rapm submodule (at <repo>/wnba_rapm/wnba_data) is the source of truth
+for stints, games, and RAPM coefficients. This script mirrors the subset of
+files the streamlit app actually reads from the local data/ folder.
+
+Analysis CSVs (pace_stats.csv, bonus_by_quarter.csv, ft_decomp.csv,
+foul_violation_rates.csv) are generated in place by scripts/regen_analysis.py
+and live alongside the synced files — they are NOT mirrored here.
 """
 
 import shutil
 from pathlib import Path
 
+from paths import RAPM_DIR
+
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-WNBA_RAPM = APP_DIR.parent / "WNBA_RAPM"
-ANALYSIS = WNBA_RAPM / "analysis"
-WNBA_DATA = WNBA_RAPM / "wnba_data"
-
 # (source, destination_filename)
 FILES = [
-    (ANALYSIS / "pace_stats.csv",             "pace_stats.csv"),
-    (ANALYSIS / "ft_decomp.csv",              "ft_decomp.csv"),
-    (ANALYSIS / "bonus_by_quarter.csv",       "bonus_by_quarter.csv"),
-    (ANALYSIS / "foul_violation_rates.csv",   "foul_violation_rates.csv"),
-    (ANALYSIS / "player_stats.csv",           "analysis_player_stats.csv"),
-    (ANALYSIS / "ft_shooting_foul_locs.csv",  "ft_shooting_foul_locs.csv"),
-    (WNBA_DATA / "games_2025_Regular_Season.csv", "games_2025_RS.csv"),
-    (WNBA_DATA / "games_2026_Regular_Season.csv", "games_2026_RS.csv"),
-    (WNBA_DATA / "stints_rich" / "stints_rich_2025_RS.csv", "stints_rich_2025.csv"),
-    (WNBA_DATA / "stints_rich" / "stints_rich_2026_RS.csv", "stints_rich_2026.csv"),
-    (WNBA_DATA / "rapm_2025_RS.csv",          "rapm_2025_RS.csv"),
-    (WNBA_DATA / "rapm_2025_RS_3yr.csv",      "rapm_2025_RS_3yr.csv"),
+    (RAPM_DIR / "games_2025_Regular_Season.csv", "games_2025_RS.csv"),
+    (RAPM_DIR / "games_2026_Regular_Season.csv", "games_2026_RS.csv"),
+    (RAPM_DIR / "stints_rich" / "stints_rich_2025_RS.csv", "stints_rich_2025.csv"),
+    (RAPM_DIR / "stints_rich" / "stints_rich_2026_RS.csv", "stints_rich_2026.csv"),
+    (RAPM_DIR / "rapm_2025_RS.csv",          "rapm_2025_RS.csv"),
+    (RAPM_DIR / "rapm_2025_RS_3yr.csv",      "rapm_2025_RS_3yr.csv"),
 ]
 
 

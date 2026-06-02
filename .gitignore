@@ -1,6 +1,10 @@
 # Claude Code worktrees (local dev tool)
 .claude/
 
+# Raw PBP JSON cache populated by wnba_origination/scripts/fetch_pbp.py
+# (~400 MB — excluded from the wnba_rapm submodule for the same reason)
+wnba_rapm_cache/
+
 # API credentials
 .env
 
