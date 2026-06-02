@@ -24,7 +24,8 @@ shank_wnba/
 │
 ├── wnba_rapm/                    ← git submodule: shankapotomus/wnba-rapm
 │   ├── update_stints.py          ← fetch new games, append to stints CSVs
-│   ├── rapm_reproducible.ipynb   ← ridge-regression RAPM fit
+│   ├── run_rapm.py               ← ridge-regression RAPM fit (script)
+│   ├── rapm_reproducible.ipynb   ← same fit as a notebook (optional)
 │   ├── pbp_shares.py             ← lineup/share analytics helpers
 │   └── wnba_data/                ← stints, games, RAPM coefficients
 │
@@ -49,7 +50,7 @@ shank_wnba/
 | Python | 3.10+ | `from __future__ import annotations` is used; 3.11 recommended |
 | pip / venv | latest | a virtualenv is strongly recommended |
 | git | 2.13+ | submodule support |
-| Jupyter | latest | for the in-app RAPM refit (uses `jupyter nbconvert --execute`) |
+| Jupyter | latest | **optional** — only needed if you prefer the notebook path; `run_rapm.py` covers the same fit without it |
 | Node + npm | 18+ | **only if rebuilding the React rotation chart** — pre-built assets are committed |
 
 Network access to `stats.nba.com` is required for any data fetch (stints updates, raw PBP downloads).
@@ -85,7 +86,7 @@ source .venv/bin/activate                     # Windows: .venv\Scripts\activate
 
 pip install --upgrade pip
 pip install -r wnba_origination/requirements.txt
-pip install jupyter nbconvert                 # for the in-app RAPM refit step
+pip install jupyter nbconvert                 # only if you want the notebook RAPM refit path
 ```
 
 ### 3.3 Verify paths resolve
@@ -273,11 +274,21 @@ python player_store.py
 
 ### 6.4 Refit RAPM only
 
+Script path (no Jupyter required):
+
+```bash
+cd wnba_rapm && python run_rapm.py && cd -
+python sync_data.py        # copy fresh rapm_*.csv into wnba_origination/data/
+python player_store.py
+```
+
+Notebook path (equivalent):
+
 ```bash
 cd wnba_rapm
 jupyter nbconvert --to notebook --execute --inplace rapm_reproducible.ipynb
 cd -
-python sync_data.py        # copy fresh rapm_*.csv into wnba_origination/data/
+python sync_data.py
 python player_store.py
 ```
 
@@ -307,7 +318,8 @@ python verify_minutes.py   # requires data/espn_box_2026.tsv + populated raw PBP
 | Script | When to run | Reads | Writes |
 |---|---|---|---|
 | `wnba_rapm/update_stints.py` | After new game(s) played | nba_api, existing stints CSV | `wnba_rapm/wnba_data/stints/stints_{year}_RS.csv` (+`stints_rich`) |
-| `wnba_rapm/rapm_reproducible.ipynb` | After stints update | stints CSVs | `wnba_rapm/wnba_data/rapm_{year}_RS.csv` (and 3yr/8factor variants) |
+| `wnba_rapm/run_rapm.py` | After stints update (script path) | stints CSVs | `wnba_rapm/wnba_data/rapm_and_4f_output.csv`, prints top-25 net RAPM |
+| `wnba_rapm/rapm_reproducible.ipynb` | After stints update (notebook path) | stints CSVs | `wnba_rapm/wnba_data/rapm_{year}_RS.csv` (and 3yr/8factor variants) |
 | `scripts/fetch_pbp.py` | After new game(s); first-time backfill | `wnba_rapm/wnba_data/games_*.csv`, nba_api | `wnba_rapm_cache/raw_pbp/{game_id}_pbp.json` + `_starters.json` |
 | `scripts/regen_analysis.py` | After raw PBP cache changes | raw PBP, `stints_rich_*` | `data/{pace_stats,bonus_by_quarter,ft_decomp,foul_violation_rates}.csv` |
 | `sync_data.py` | After submodule RAPM/games update | `wnba_rapm/wnba_data/` | `data/{games,stints_rich,rapm}_*.csv` |
@@ -334,7 +346,7 @@ python verify_minutes.py   # requires data/espn_box_2026.tsv + populated raw PBP
 
 **`player_store.csv` has 0 rows for 2026 RAPM** — fallback chain hits 2025 1yr → 2025 3yr → 0.0 (`player_store.py`). Expected early-season; populates once 2026 RAPM CSV crosses 300 possessions per player.
 
-**Refresh button hangs on Step 2 (notebook refit)** — `jupyter nbconvert --execute` runs for 5-15 min. Watch the streaming log; if it actually stalls, the timeout is 30 min. Use **Run daily ingest (fast)** in Advanced rebuilds to skip the refit.
+**Refresh button hangs on Step 2 (notebook refit)** — `jupyter nbconvert --execute` runs for 5-15 min. Watch the streaming log; if it actually stalls, the timeout is 30 min. Use **Run daily ingest (fast)** in Advanced rebuilds to skip the refit, or refit from the CLI with `python wnba_rapm/run_rapm.py` (no Jupyter required).
 
 **Performance tab empty** — drop BigDataBall CSVs into `data/bigdataball/` (see §3.7).
 
