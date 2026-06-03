@@ -2,13 +2,13 @@
 
 End-to-end guide for running the WNBA line-origination Streamlit app: setup on a fresh machine, daily in-season refresh, and how to actually use the app. Linux / macOS / Windows.
 
-> TL;DR — clone with `--recurse-submodules`, `pip install -r wnba_origination/requirements.txt`, bootstrap the raw-PBP cache with `python scripts/fetch_pbp.py`, regenerate the analysis CSVs, then `streamlit run app.py`.
+> TL;DR — clone, `pip install -r wnba_origination/requirements.txt`, bootstrap the raw-PBP cache with `python scripts/fetch_pbp.py`, regenerate the analysis CSVs, then `streamlit run app.py`.
 
 ---
 
 ## 1. Architecture
 
-The repo is split into two pieces:
+The repo is laid out in three sibling top-level pieces:
 
 ```
 shank_wnba/
@@ -16,13 +16,13 @@ shank_wnba/
 │   ├── app.py                    ← Streamlit entry point
 │   ├── paths.py                  ← single source of truth for all file paths
 │   ├── refresh.py                ← CLI orchestrator
-│   ├── sync_data.py              ← mirror submodule CSVs → data/
+│   ├── sync_data.py              ← mirror wnba_rapm CSVs → data/
 │   ├── scripts/
 │   │   ├── fetch_pbp.py          ← download raw PBP JSON via nba_api
 │   │   └── regen_analysis.py     ← rebuild pace_stats / bonus / ft / fouls
 │   └── data/                     ← local cache the app actually reads
 │
-├── wnba_rapm/                    ← git submodule: shankapotomus/wnba-rapm
+├── wnba_rapm/                    ← RAPM model + stints data
 │   ├── update_stints.py          ← fetch new games, append to stints CSVs
 │   ├── run_rapm.py               ← ridge-regression RAPM fit (script)
 │   ├── rapm_reproducible.ipynb   ← same fit as a notebook (optional)
@@ -35,9 +35,9 @@ shank_wnba/
 
 **Why three locations?**
 
-- `wnba_rapm/` is a clean public repo (shankapotomus/wnba-rapm). It owns the RAPM math and the stints data. Pull updates with `git submodule update --remote`.
-- `wnba_rapm_cache/` holds the ~400 MB of raw PBP JSON the submodule intentionally excludes. The app reads it for rotation heatmaps, box scores, and to regenerate analysis CSVs.
-- `wnba_origination/data/` is the local cache the streamlit app reads from. Everything in it is either copied from the submodule (via `sync_data.py`) or computed locally (via `regen_analysis.py`, `player_store.py`, `game_log.py`).
+- `wnba_rapm/` owns the RAPM math and the stints data. It's a regular directory in this repo (previously a git submodule; absorbed in-place so there's no separate clone step).
+- `wnba_rapm_cache/` holds the ~400 MB of raw PBP JSON intentionally excluded from version control. The app reads it for rotation heatmaps, box scores, and to regenerate analysis CSVs.
+- `wnba_origination/data/` is the local cache the streamlit app reads from. Everything in it is either copied from `wnba_rapm/wnba_data/` (via `sync_data.py`) or computed locally (via `regen_analysis.py`, `player_store.py`, `game_log.py`).
 
 `paths.py` is the single source of truth. `RAPM_DIR` defaults to `wnba_rapm/wnba_data/` and `RAW_PBP_DIR` defaults to `wnba_rapm_cache/raw_pbp/`. Override either with the `WNBA_RAPM_DIR` and `WNBA_RAW_PBP_DIR` env vars.
 
@@ -59,20 +59,14 @@ Network access to `stats.nba.com` is required for any data fetch (stints updates
 
 ## 3. One-Time Setup
 
-### 3.1 Clone with submodules
+### 3.1 Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/samhoppen/shank_wnba.git
+git clone <your-repo-url>
 cd shank_wnba
 ```
 
-If you forgot `--recurse-submodules`:
-
-```bash
-git submodule update --init --recursive
-```
-
-Verify the submodule populated:
+Verify the RAPM data is present:
 
 ```bash
 ls wnba_rapm/wnba_data/stints/stints_2026_RS.csv   # should exist
@@ -111,7 +105,7 @@ export WNBA_RAPM_DIR=/some/other/path/wnba_data
 
 ### 3.4 Bootstrap the raw PBP cache
 
-The submodule excludes raw PBP JSON. Download it (~400 MB, slow — be patient, rate-limited at 0.6 s/request):
+Raw PBP JSON is gitignored. Download it (~400 MB, slow — be patient, rate-limited at 0.6 s/request):
 
 ```bash
 # All seasons (~1 hour wall time)
@@ -126,7 +120,7 @@ Files land in `wnba_rapm_cache/raw_pbp/` as `{game_id}_pbp.json` and `{game_id}_
 ### 3.5 Build the local caches the app reads
 
 ```bash
-python sync_data.py             # mirror games + rapm + stints_rich from submodule into data/
+python sync_data.py             # mirror games + rapm + stints_rich from wnba_rapm/ into data/
 python scripts/regen_analysis.py --all   # build pace_stats, bonus, ft_decomp, foul rates from PBP
 python pace.py                  # build pace_cache.csv (uses 2021-2025 stints)
 python player_store.py          # build unified player table
@@ -243,7 +237,7 @@ Click **🔄 Refresh all data** in the sidebar. Runs:
 3. `scripts/fetch_pbp.py --year 2026` — downloads raw PBP for new games
 4. `scripts/regen_analysis.py --year 2026 --append-2025` — rebuilds analysis CSVs
 5. `game_log.build()` — per-game four/five factors
-6. `fetch_hth.py` + `sync_data.sync()` — HTH cross-check + mirror submodule CSVs
+6. `fetch_hth.py` + `sync_data.sync()` — HTH cross-check + mirror wnba_rapm CSVs
 7. `player_store.build()` — unified player table
 
 Then clears Streamlit's cache and reruns. Total: ~5-15 min depending on how many new games.
@@ -292,20 +286,13 @@ python sync_data.py
 python player_store.py
 ```
 
-### 6.5 Pull submodule updates from upstream
-
-```bash
-cd wnba_rapm && git pull origin main && cd -
-git add wnba_rapm && git commit -m "Bump wnba_rapm submodule"
-```
-
-### 6.6 Cross-check vs helpthehelper.vercel.app
+### 6.5 Cross-check vs helpthehelper.vercel.app
 
 ```bash
 python fetch_hth.py        # writes data/hth_players_2026.csv
 ```
 
-### 6.7 Validate PBP-derived minutes vs ESPN box scores
+### 6.6 Validate PBP-derived minutes vs ESPN box scores
 
 ```bash
 python verify_minutes.py   # requires data/espn_box_2026.tsv + populated raw PBP
@@ -322,7 +309,7 @@ python verify_minutes.py   # requires data/espn_box_2026.tsv + populated raw PBP
 | `wnba_rapm/rapm_reproducible.ipynb` | After stints update (notebook path) | stints CSVs | `wnba_rapm/wnba_data/rapm_{year}_RS.csv` (and 3yr/8factor variants) |
 | `scripts/fetch_pbp.py` | After new game(s); first-time backfill | `wnba_rapm/wnba_data/games_*.csv`, nba_api | `wnba_rapm_cache/raw_pbp/{game_id}_pbp.json` + `_starters.json` |
 | `scripts/regen_analysis.py` | After raw PBP cache changes | raw PBP, `stints_rich_*` | `data/{pace_stats,bonus_by_quarter,ft_decomp,foul_violation_rates}.csv` |
-| `sync_data.py` | After submodule RAPM/games update | `wnba_rapm/wnba_data/` | `data/{games,stints_rich,rapm}_*.csv` |
+| `sync_data.py` | After RAPM/games update | `wnba_rapm/wnba_data/` | `data/{games,stints_rich,rapm}_*.csv` |
 | `pace.py` | Once, or when stints 2021-2025 change | `stints_{2021..2025}_RS.csv` | `data/pace_cache.csv` |
 | `player_store.py` | After RAPM or roster update | RAPM CSVs, `player_minutes`, `player_names`, EC CSVs | `data/player_store.csv` |
 | `game_log.py` | After raw PBP cache changes | `raw_pbp/*.json`, `games_*.csv`, stints | `data/game_log.csv` |
@@ -336,7 +323,7 @@ python verify_minutes.py   # requires data/espn_box_2026.tsv + populated raw PBP
 
 ## 8. Troubleshooting
 
-**`FileNotFoundError` for files in `wnba_rapm/wnba_data/`** — the submodule isn't initialized. Run `git submodule update --init --recursive`.
+**`FileNotFoundError` for files in `wnba_rapm/wnba_data/`** — the CSVs should ship with the repo. If they're missing, your clone may have skipped them via `.gitattributes` or LFS settings — re-clone or `git checkout HEAD -- wnba_rapm/wnba_data/`.
 
 **Rotation chart shows empty / "no PBP for game X"** — the raw PBP for that game isn't in `wnba_rapm_cache/raw_pbp/`. Run `python scripts/fetch_pbp.py --year 2026` (or `--game-ids <gid>`).
 
@@ -352,8 +339,6 @@ python verify_minutes.py   # requires data/espn_box_2026.tsv + populated raw PBP
 
 **Win totals don't sum to 308** — the zero-sum rescale in `win_totals.py` enforces this; a violation usually means a team is missing from `player_store.csv`. Check `team_abbr` coverage for the 15 WNBA tricodes.
 
-**Submodule shows untracked files in `git status`** — you wrote into it (e.g. let the notebook regenerate CSVs in-place). Either commit those upstream in the wnba-rapm repo or `git -C wnba_rapm restore .` to discard.
-
 ---
 
 ## 9. Minimum Viable Run (no network, no PBP cache)
@@ -361,7 +346,7 @@ python verify_minutes.py   # requires data/espn_box_2026.tsv + populated raw PBP
 If you just want to *boot* the app to inspect the UI using the CSVs already committed to `data/`:
 
 ```bash
-git clone --recurse-submodules https://github.com/samhoppen/shank_wnba.git
+git clone <your-repo-url>
 cd shank_wnba
 pip install -r wnba_origination/requirements.txt
 cd wnba_origination

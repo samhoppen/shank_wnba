@@ -23,8 +23,8 @@ from paths import RAPM_DIR, REPO_ROOT, DATA, RAW_PBP_DIR, stints as stints_path
 
 GAME_LOG_CACHE = DATA / "game_log.csv"
 
-# Pull in the PBP possession walker from the wnba_rapm submodule for accurate
-# pace counts. Falls back to the box-score formula if the symbol isn't found.
+# Pull in the PBP possession walker from wnba_rapm/ for accurate pace counts.
+# Falls back to the box-score formula if the symbol isn't found.
 import sys as _sys
 _sys.path.insert(0, str(REPO_ROOT / "wnba_rapm"))
 try:

@@ -1,5 +1,5 @@
 """
-regen_analysis.py — rebuild the analysis CSVs the wnba_rapm submodule omits.
+regen_analysis.py — rebuild the analysis CSVs derived from raw PBP.
 
 Produces, into wnba_origination/data/:
     pace_stats.csv          — per (game_id, team): pace, ortg, PTS, FGA, FTA, TOV, OREB
@@ -9,8 +9,8 @@ Produces, into wnba_origination/data/:
 
 Sources:
     - Raw PBP JSON in RAW_PBP_DIR (populated by scripts/fetch_pbp.py)
-    - games_{year}_Regular_Season.csv from the wnba_rapm submodule
-    - stints_rich_{year}_RS.csv from the wnba_rapm submodule
+    - games_{year}_Regular_Season.csv from wnba_rapm/wnba_data/
+    - stints_rich_{year}_RS.csv from wnba_rapm/wnba_data/
 
 Usage:
     python -m wnba_origination.scripts.regen_analysis --year 2026

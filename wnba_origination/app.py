@@ -2237,7 +2237,7 @@ def _refresh_all_data() -> None:
 
     APP_DIR = Path(__file__).resolve().parent
     REPO_ROOT = APP_DIR.parent
-    SUBMODULE = REPO_ROOT / "wnba_rapm"
+    RAPM_ROOT = REPO_ROOT / "wnba_rapm"
     SCRIPTS = APP_DIR / "scripts"
 
     status = st.empty()
@@ -2245,17 +2245,17 @@ def _refresh_all_data() -> None:
     log_box = st.empty()
     year = "2026"
 
-    # Step 1: Update stints (new repo's script)
+    # Step 1: Update stints
     status.info("Step 1/7 — Updating stints from stats.nba.com (slow)…")
-    if SUBMODULE.exists():
+    if RAPM_ROOT.exists():
         rc = _stream_subprocess(
             [sys.executable, "-u", "update_stints.py", "--season", year],
-            cwd=SUBMODULE, log_box=log_box,
+            cwd=RAPM_ROOT, log_box=log_box,
         )
         if rc != 0:
             st.warning(f"update_stints.py exited code {rc}")
     else:
-        st.warning(f"wnba_rapm submodule not found at {SUBMODULE}")
+        st.warning(f"wnba_rapm directory not found at {RAPM_ROOT}")
     log_box.empty()
     progress.progress(15)
 
@@ -2265,7 +2265,7 @@ def _refresh_all_data() -> None:
         [sys.executable, "-m", "jupyter", "nbconvert",
          "--to", "notebook", "--execute", "--inplace",
          "rapm_reproducible.ipynb"],
-        cwd=SUBMODULE, log_box=log_box, timeout=1800,
+        cwd=RAPM_ROOT, log_box=log_box, timeout=1800,
     )
     if rc != 0:
         st.warning(f"RAPM notebook exited code {rc} (continuing)")
@@ -2338,7 +2338,7 @@ def _quick_ingest() -> None:
     import sys
     from pathlib import Path
     APP_DIR = Path(__file__).resolve().parent
-    SUBMODULE = APP_DIR.parent / "wnba_rapm"
+    RAPM_ROOT = APP_DIR.parent / "wnba_rapm"
     SCRIPTS = APP_DIR / "scripts"
     status = st.empty()
     log_box = st.empty()
@@ -2346,7 +2346,7 @@ def _quick_ingest() -> None:
 
     status.info("1/3 — Updating stints…")
     _stream_subprocess([sys.executable, "-u", "update_stints.py", "--season", year],
-                       cwd=SUBMODULE, log_box=log_box)
+                       cwd=RAPM_ROOT, log_box=log_box)
     status.info("2/3 — Fetching raw PBP…")
     _stream_subprocess([sys.executable, "-u", str(SCRIPTS / "fetch_pbp.py"), "--year", year],
                        cwd=APP_DIR, log_box=log_box)

@@ -1,9 +1,9 @@
 """
-Sync data files from the wnba_rapm submodule into wnba_origination/data/.
+Sync data files from wnba_rapm/ into wnba_origination/data/.
 
-The wnba_rapm submodule (at <repo>/wnba_rapm/wnba_data) is the source of truth
-for stints, games, and RAPM coefficients. This script mirrors the subset of
-files the streamlit app actually reads from the local data/ folder.
+The wnba_rapm/wnba_data directory is the source of truth for stints, games,
+and RAPM coefficients. This script mirrors the subset of files the streamlit
+app actually reads from the local data/ folder.
 
 Analysis CSVs (pace_stats.csv, bonus_by_quarter.csv, ft_decomp.csv,
 foul_violation_rates.csv) are generated in place by scripts/regen_analysis.py

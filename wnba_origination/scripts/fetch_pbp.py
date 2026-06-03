@@ -1,10 +1,9 @@
 """
 fetch_pbp.py — download raw WNBA play-by-play JSON for the streamlit app.
 
-The wnba_rapm submodule intentionally excludes raw PBP files (~400 MB). The
-app's rotation grid heatmaps, per-game box scores, and analysis regenerator
-need them, so this script populates the local cache (default location:
-<repo>/wnba_rapm_cache/raw_pbp/).
+Raw PBP files (~400 MB) are gitignored. The app's rotation grid heatmaps,
+per-game box scores, and analysis regenerator need them, so this script
+populates the local cache (default location: <repo>/wnba_rapm_cache/raw_pbp/).
 
 Writes two files per game:
     {game_id}_pbp.json       — list[dict] events normalised to snake_case
@@ -41,7 +40,7 @@ SLEEP_SEC = 0.6
 # ── nba_api helpers ──────────────────────────────────────────────────────────
 
 def _fetch_game_ids(year: int) -> list[str]:
-    """Prefer the games CSV shipped in the submodule; fall back to nba_api."""
+    """Prefer the games CSV shipped in wnba_rapm/; fall back to nba_api."""
     games_csv = RAPM_DIR / f"games_{year}_Regular_Season.csv"
     if games_csv.exists():
         df = pd.read_csv(games_csv, usecols=["game_id"], dtype={"game_id": str})
